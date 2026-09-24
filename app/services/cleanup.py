@@ -8,6 +8,7 @@ from pymongo.asynchronous.database import AsyncDatabase
 
 from app.core.config import Settings
 from app.models.common import now
+from app.services.review import media_keys
 from app.services.storage import Storage
 
 log = logging.getLogger("kaskad.cleanup")
@@ -29,10 +30,8 @@ async def run_cleanup(db: AsyncDatabase, storage: Storage, settings: Settings) -
     async for v in db.versions.find({"upload_status": {"$in": ["stored", "uploading"]}}, {"storage_key": 1}):
         if v.get("storage_key"):
             referenced.add(v["storage_key"])
-    async for a in db.apps.find({}, {"icon_key": 1, "screenshot_keys": 1}):
-        if a.get("icon_key"):
-            referenced.add(a["icon_key"])
-        referenced.update(a.get("screenshot_keys", []))
+    async for a in db.apps.find({}, {"icon_key": 1, "screenshot_keys": 1, "listing_draft": 1}):
+        referenced.update(media_keys(a))  # fiche en ligne + brouillon de fiche
     for prefix in ("binaries/", "media/"):
         for obj in await storage.list_objects(prefix):
             if obj.key not in referenced and obj.last_modified < cutoff and not obj.key.endswith(".part"):

@@ -61,6 +61,12 @@ def version_public(v: dict) -> dict:
     }
 
 
+def _review(r):
+    from app.services.review import review_out
+
+    return review_out(r)
+
+
 def version_admin(v: dict) -> dict:
     return {
         **version_public(v),
@@ -68,6 +74,7 @@ def version_admin(v: dict) -> dict:
         "upload_status": v.get("upload_status"),
         "file_name": v.get("file_name"),
         "scan_report": v.get("scan_report"),
+        "review": _review(v.get("review")),
         "apk_info": v.get("apk_info"),
         "created_by": sid(v.get("created_by")),
         "downloads_count": v.get("downloads_count", 0),
@@ -86,8 +93,15 @@ def app_detail(a: dict, categories: list[dict], versions: list[dict]) -> dict:
 
 
 def app_admin(a: dict) -> dict:
+    from app.services.review import listing_out, review_out
+
     return {
         **app_summary(a),
+        # Circuit de validation : brouillon de fiche, demande de validation de la fiche, demande de changement de statut
+        "draft": listing_out(a.get("listing_draft")),
+        "listing_review": review_out(a.get("listing_review")),
+        "status_request": review_out(a.get("status_request")),
+        "created_by": sid(a.get("created_by")),
         "long_description": a.get("long_description", ""),
         "screenshots": [media_url(k) for k in a.get("screenshot_keys", [])],
         "target_platforms": a.get("target_platforms", []),

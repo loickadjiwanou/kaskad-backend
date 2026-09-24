@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from app.deps import CurrentAdmin, Db
 from app.models.common import maybe_oid, now, sid
 from app.services.activity import activity_out
-from app.services.catalog import version_admin
+from app.services.catalog import app_admin, version_admin
 from app.services.stats import downloads_by, downloads_timeseries, raw_downloads, top_apps
 
 router = APIRouter(prefix="/admin", tags=["admin: stats & moderation"])
@@ -28,6 +28,11 @@ async def overview(db: Db, _: CurrentAdmin):
     last_30 = await db.download_stats.count_documents({"timestamp": {"$gte": now() - timedelta(days=30)}})
     pending_review = await db.versions.count_documents(
         {"upload_status": "stored", "status": "draft", "security_scan_status": {"$in": ["pending", "scanning", "passed"]}}
+    )
+    reviews_pending = (
+        await db.versions.count_documents({"review.state": "pending", "status": "draft"})
+        + await db.apps.count_documents({"status_request.state": "pending"})
+        + await db.apps.count_documents({"listing_review.state": "pending"})
     )
     recent = await (
         await db.versions.aggregate(
@@ -49,6 +54,8 @@ async def overview(db: Db, _: CurrentAdmin):
         "total_downloads": total_downloads,
         "downloads_last_30_days": last_30,
         "versions_pending_review": pending_review,
+        # Demandes des éditeurs en attente de validation par un admin complet
+        "reviews_pending": reviews_pending,
         "recent_publications": [
             {
                 "version_id": sid(v["_id"]),
@@ -147,6 +154,27 @@ async def moderation_queue(db: Db, _: CurrentAdmin):
         a["_id"]: a["name"] for a in await db.apps.find({"_id": {"$in": list({v["app_id"] for v in versions})}}, {"name": 1}).to_list(None)
     }
     return [{**version_admin(v), "app_name": apps.get(v["app_id"])} for v in versions]
+
+
+@router.get("/moderation/reviews")
+async def moderation_reviews(db: Db, _: CurrentAdmin):
+    """Demandes de validation (en attente ou refusées) : versions soumises, changements de statut, modifications de fiche."""
+    states = {"$in": ["pending", "rejected"]}
+    versions = await db.versions.find({"review.state": states, "status": "draft"}).sort("review.submitted_at", -1).to_list(None)
+    names = {
+        a["_id"]: (a["name"], a.get("status"))
+        for a in await db.apps.find({"_id": {"$in": list({v["app_id"] for v in versions})}}, {"name": 1, "status": 1}).to_list(None)
+    }
+    status_requests = await db.apps.find({"status_request.state": states}).sort("status_request.submitted_at", -1).to_list(None)
+    listings = await db.apps.find({"listing_review.state": states}).sort("listing_review.submitted_at", -1).to_list(None)
+    return {
+        "versions": [
+            {**version_admin(v), "app_name": names.get(v["app_id"], (None, None))[0], "app_status": names.get(v["app_id"], (None, None))[1]}
+            for v in versions
+        ],
+        "status_requests": [app_admin(a) for a in status_requests],
+        "listings": [app_admin(a) for a in listings],
+    }
 
 
 @router.get("/activity")

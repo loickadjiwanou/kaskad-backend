@@ -77,6 +77,16 @@ async def require_full_admin(admin: CurrentAdmin) -> dict:
 FullAdmin = Annotated[dict, Depends(require_full_admin)]
 
 
+async def require_publisher(admin: CurrentAdmin) -> dict:
+    """Publication et validation des demandes : réservées aux admins complets (les éditeurs soumettent)."""
+    if admin.get("role") != "admin":
+        raise ApiError(403, "publish_requires_admin")
+    return admin
+
+
+Publisher = Annotated[dict, Depends(require_publisher)]
+
+
 async def current_user(db: Db, creds: Credentials) -> dict:
     payload = _access_payload(creds, "user")
     user = await db.users.find_one({"_id": maybe_oid(payload["sub"])})

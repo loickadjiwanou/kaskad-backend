@@ -9,11 +9,22 @@ from fastapi import APIRouter, File, Query, UploadFile
 
 from app.core.config import get_settings
 from app.core.i18n import ApiError
-from app.deps import CurrentAdmin, Db, StorageDep
+from app.deps import CurrentAdmin, Db, Publisher, StorageDep
 from app.models.common import AppStatus, maybe_oid, now, oid
-from app.models.schemas import AppIn, AppStatusIn, AppUpdate, ScreenshotsOrder
+from app.models.schemas import AppIn, AppStatusIn, AppUpdate, ReviewReject, ReviewSubmit, ScreenshotsOrder, StatusRequestIn
 from app.services.activity import log_activity
 from app.services.catalog import PUBLIC_VERSION_FILTER, app_admin, app_detail
+from app.services.review import (
+    LISTING_FIELDS,
+    decision,
+    delete_unreferenced,
+    editable_listing,
+    is_full_admin,
+    is_pending,
+    media_keys,
+    submission,
+    uses_draft,
+)
 from app.services.storage import Storage
 
 router = APIRouter(prefix="/admin/apps", tags=["admin: apps"])
@@ -103,33 +114,196 @@ async def get_app(db: Db, _: CurrentAdmin, app_id: str):
 
 
 @router.get("/{app_id}/preview")
-async def preview_app(db: Db, _: CurrentAdmin, app_id: str):
-    """Fiche telle qu'elle sera affichée dans l'app client (même format que GET /apps/{id}), quel que soit le statut."""
+async def preview_app(db: Db, _: CurrentAdmin, app_id: str, draft: bool = False):
+    """Fiche telle qu'elle sera affichée dans l'app client (même format que GET /apps/{id}), quel que soit le statut.
+
+    `draft=true` : fiche avec les modifications en attente (brouillon de fiche) appliquées.
+    """
     app = await get_app_or_404(db, app_id)
+    if draft and app.get("listing_draft"):
+        app = {**app, **{f: app["listing_draft"].get(f) for f in LISTING_FIELDS}}
     categories = await db.categories.find({"_id": {"$in": app.get("category_ids", [])}}).sort("order", 1).to_list(None)
     versions = await db.versions.find({"app_id": app["_id"], **PUBLIC_VERSION_FILTER}).sort("version_code", -1).to_list(None)
     return app_detail(app, categories, versions)
+
+
+async def _update_listing(db, admin: dict, app: dict, update: dict) -> dict:
+    """Applique une modification de fiche : en ligne si l'app n'est pas visible, sinon dans le brouillon de fiche.
+
+    Toute modification du brouillon annule une demande de validation en cours (il faut la soumettre à nouveau).
+    """
+    if uses_draft(app):
+        draft = {**editable_listing(app), **update, "updated_at": now(), "updated_by_name": admin.get("name")}
+        await db.apps.update_one(
+            {"_id": app["_id"]}, {"$set": {"listing_draft": draft, "updated_at": now()}, "$unset": {"listing_review": ""}}
+        )
+    else:
+        await db.apps.update_one({"_id": app["_id"]}, {"$set": {**update, "updated_at": now()}})
+    return await db.apps.find_one({"_id": app["_id"]})
 
 
 @router.patch("/{app_id}")
 async def update_app(db: Db, admin: CurrentAdmin, app_id: str, body: AppUpdate):
     app = await get_app_or_404(db, app_id)
     update = body.model_dump(exclude_none=True, exclude={"category_ids"})
+    if "android_package" in body.model_fields_set and body.android_package in (None, ""):
+        update["android_package"] = None
     if body.category_ids is not None:
         update["category_ids"] = await _category_ids(db, body.category_ids)
-    update["updated_at"] = now()
-    await db.apps.update_one({"_id": app["_id"]}, {"$set": update})
-    await log_activity(db, admin, "app.updated", "app", app["_id"], {"fields": sorted(body.model_dump(exclude_none=True))})
+    updated = await _update_listing(db, admin, app, update)
+    await log_activity(db, admin, "app.updated", "app", app["_id"], {"fields": sorted(update), "draft": bool(updated.get("listing_draft"))})
+    return app_admin(updated)
+
+
+async def _apply_status(db, admin: dict, app: dict, status: str, requested_by: str | None = None) -> dict:
+    await db.apps.update_one({"_id": app["_id"]}, {"$set": {"status": status, "updated_at": now()}, "$unset": {"status_request": ""}})
+    details = {"from": app.get("status"), "name": app["name"]}
+    if requested_by:
+        details["requested_by"] = requested_by
+    await log_activity(db, admin, f"app.{status}", "app", app["_id"], details)
     return app_admin(await db.apps.find_one({"_id": app["_id"]}))
 
 
 @router.post("/{app_id}/status")
-async def set_status(db: Db, admin: CurrentAdmin, app_id: str, body: AppStatusIn):
-    """Brouillon / publié / archivé (dépublié). Les apps ne sont jamais supprimées physiquement."""
+async def set_status(db: Db, admin: Publisher, app_id: str, body: AppStatusIn):
+    """Brouillon / publié / archivé (dépublié), réservé aux admins complets. Les apps ne sont jamais supprimées physiquement."""
     app = await get_app_or_404(db, app_id)
-    await db.apps.update_one({"_id": app["_id"]}, {"$set": {"status": body.status, "updated_at": now()}})
-    await log_activity(db, admin, f"app.{body.status}", "app", app["_id"], {"from": app.get("status"), "name": app["name"]})
+    return await _apply_status(db, admin, app, body.status)
+
+
+@router.post("/{app_id}/status-request")
+async def request_status(db: Db, admin: CurrentAdmin, app_id: str, body: StatusRequestIn):
+    """Demande de changement de statut (publier / dépublier / brouillon), à valider par un admin complet."""
+    app = await get_app_or_404(db, app_id)
+    if body.status == app.get("status"):
+        raise ApiError(409, "status_unchanged")
+    if is_pending(app.get("status_request")):
+        raise ApiError(409, "already_submitted")
+    request = submission(admin, body.note, status=body.status)
+    await db.apps.update_one({"_id": app["_id"]}, {"$set": {"status_request": request}})
+    await log_activity(db, admin, "app.status_requested", "app", app["_id"], {"name": app["name"], "status": body.status})
     return app_admin(await db.apps.find_one({"_id": app["_id"]}))
+
+
+@router.post("/{app_id}/status-request/approve")
+async def approve_status_request(db: Db, admin: Publisher, app_id: str):
+    app = await get_app_or_404(db, app_id)
+    request = app.get("status_request")
+    if not is_pending(request):
+        raise ApiError(409, "review_not_pending")
+    return await _apply_status(db, admin, app, request["status"], requested_by=request.get("submitted_by_name"))
+
+
+@router.post("/{app_id}/status-request/reject")
+async def reject_status_request(db: Db, admin: Publisher, app_id: str, body: ReviewReject):
+    app = await get_app_or_404(db, app_id)
+    request = app.get("status_request")
+    if not is_pending(request):
+        raise ApiError(409, "review_not_pending")
+    await db.apps.update_one({"_id": app["_id"]}, {"$set": {"status_request": {**request, **decision(admin, "rejected", body.reason)}}})
+    await log_activity(
+        db,
+        admin,
+        "app.status_request_rejected",
+        "app",
+        app["_id"],
+        {"name": app["name"], "status": request["status"], "reason": body.reason},
+    )
+    return app_admin(await db.apps.find_one({"_id": app["_id"]}))
+
+
+@router.delete("/{app_id}/status-request")
+async def withdraw_status_request(db: Db, admin: CurrentAdmin, app_id: str):
+    """Retire la demande (en attente) ou efface un refus. Réservé à son auteur ou à un admin complet."""
+    app = await get_app_or_404(db, app_id)
+    request = app.get("status_request")
+    if not request:
+        raise ApiError(409, "review_not_pending")
+    if request.get("submitted_by") != admin["_id"] and not is_full_admin(admin):
+        raise ApiError(403, "forbidden")
+    await db.apps.update_one({"_id": app["_id"]}, {"$unset": {"status_request": ""}})
+    if is_pending(request):
+        await log_activity(db, admin, "app.status_request_withdrawn", "app", app["_id"], {"name": app["name"], "status": request["status"]})
+    return app_admin(await db.apps.find_one({"_id": app["_id"]}))
+
+
+# ---------------------------------------------------------------- brouillon de fiche
+
+
+@router.post("/{app_id}/listing/submit")
+async def submit_listing(db: Db, admin: CurrentAdmin, app_id: str, body: ReviewSubmit):
+    """Soumet les modifications de fiche (brouillon) à la validation d'un admin complet."""
+    app = await get_app_or_404(db, app_id)
+    if not app.get("listing_draft"):
+        raise ApiError(409, "no_listing_draft")
+    if is_pending(app.get("listing_review")):
+        raise ApiError(409, "already_submitted")
+    await db.apps.update_one({"_id": app["_id"]}, {"$set": {"listing_review": submission(admin, body.note)}})
+    await log_activity(db, admin, "app.listing_submitted", "app", app["_id"], {"name": app["name"]})
+    return app_admin(await db.apps.find_one({"_id": app["_id"]}))
+
+
+@router.post("/{app_id}/listing/publish")
+async def publish_listing(db: Db, storage: StorageDep, admin: Publisher, app_id: str):
+    """Met en ligne le brouillon de fiche (validation d'une demande, ou publication directe par un admin complet)."""
+    app = await get_app_or_404(db, app_id)
+    draft = app.get("listing_draft")
+    if not draft:
+        raise ApiError(409, "no_listing_draft")
+    before = media_keys(app)
+    live = {f: draft.get(f) for f in LISTING_FIELDS}
+    await db.apps.update_one(
+        {"_id": app["_id"]},
+        {"$set": {**live, "updated_at": now()}, "$unset": {"listing_draft": "", "listing_review": ""}},
+    )
+    updated = await db.apps.find_one({"_id": app["_id"]})
+    await delete_unreferenced(storage, updated, before)
+    review = app.get("listing_review")
+    details = {"name": live.get("name") or app["name"]}
+    if is_pending(review):
+        details["requested_by"] = review.get("submitted_by_name")
+    await log_activity(db, admin, "app.listing_published", "app", app["_id"], details)
+    return app_admin(updated)
+
+
+@router.post("/{app_id}/listing/reject")
+async def reject_listing(db: Db, admin: Publisher, app_id: str, body: ReviewReject):
+    app = await get_app_or_404(db, app_id)
+    review = app.get("listing_review")
+    if not is_pending(review):
+        raise ApiError(409, "review_not_pending")
+    await db.apps.update_one({"_id": app["_id"]}, {"$set": {"listing_review": {**review, **decision(admin, "rejected", body.reason)}}})
+    await log_activity(db, admin, "app.listing_rejected", "app", app["_id"], {"name": app["name"], "reason": body.reason})
+    return app_admin(await db.apps.find_one({"_id": app["_id"]}))
+
+
+@router.delete("/{app_id}/listing/review")
+async def withdraw_listing_review(db: Db, admin: CurrentAdmin, app_id: str):
+    """Retire la soumission (le brouillon est conservé). Réservé à son auteur ou à un admin complet."""
+    app = await get_app_or_404(db, app_id)
+    review = app.get("listing_review")
+    if not review:
+        raise ApiError(409, "review_not_pending")
+    if review.get("submitted_by") != admin["_id"] and not is_full_admin(admin):
+        raise ApiError(403, "forbidden")
+    await db.apps.update_one({"_id": app["_id"]}, {"$unset": {"listing_review": ""}})
+    if is_pending(review):
+        await log_activity(db, admin, "app.listing_withdrawn", "app", app["_id"], {"name": app["name"]})
+    return app_admin(await db.apps.find_one({"_id": app["_id"]}))
+
+
+@router.delete("/{app_id}/listing")
+async def discard_listing(db: Db, storage: StorageDep, admin: CurrentAdmin, app_id: str):
+    """Abandonne les modifications de fiche : la fiche en ligne reste inchangée."""
+    app = await get_app_or_404(db, app_id)
+    if not app.get("listing_draft"):
+        raise ApiError(409, "no_listing_draft")
+    before = media_keys(app)
+    await db.apps.update_one({"_id": app["_id"]}, {"$unset": {"listing_draft": "", "listing_review": ""}, "$set": {"updated_at": now()}})
+    updated = await db.apps.find_one({"_id": app["_id"]})
+    await delete_unreferenced(storage, updated, before)
+    await log_activity(db, admin, "app.listing_discarded", "app", app["_id"], {"name": app["name"]})
+    return app_admin(updated)
 
 
 # ---------------------------------------------------------------- médias
@@ -152,22 +326,25 @@ async def _store_image(storage: Storage, app_id, file: UploadFile, kind: str) ->
 async def upload_icon(db: Db, storage: StorageDep, admin: CurrentAdmin, app_id: str, file: UploadFile = File(...)):
     app = await get_app_or_404(db, app_id)
     key = await _store_image(storage, app["_id"], file, "icon")
-    await db.apps.update_one({"_id": app["_id"]}, {"$set": {"icon_key": key, "updated_at": now()}})
-    if app.get("icon_key"):
-        await storage.delete(app["icon_key"])
-    await log_activity(db, admin, "app.icon_updated", "app", app["_id"])
-    return app_admin(await db.apps.find_one({"_id": app["_id"]}))
+    previous = editable_listing(app).get("icon_key")
+    updated = await _update_listing(db, admin, app, {"icon_key": key})
+    await delete_unreferenced(storage, updated, [previous])
+    await log_activity(db, admin, "app.icon_updated", "app", app["_id"], {"draft": bool(updated.get("listing_draft"))})
+    return app_admin(updated)
 
 
 @router.post("/{app_id}/screenshots")
 async def add_screenshots(db: Db, storage: StorageDep, admin: CurrentAdmin, app_id: str, files: list[UploadFile] = File(...)):
     app = await get_app_or_404(db, app_id)
-    if len(app.get("screenshot_keys", [])) + len(files) > MAX_SCREENSHOTS:
+    current = editable_listing(app).get("screenshot_keys") or []
+    if len(current) + len(files) > MAX_SCREENSHOTS:
         raise ApiError(422, "too_many_screenshots")
     keys = [await _store_image(storage, app["_id"], f, "screenshot") for f in files]
-    await db.apps.update_one({"_id": app["_id"]}, {"$push": {"screenshot_keys": {"$each": keys}}, "$set": {"updated_at": now()}})
-    await log_activity(db, admin, "app.screenshots_added", "app", app["_id"], {"count": len(keys)})
-    return app_admin(await db.apps.find_one({"_id": app["_id"]}))
+    updated = await _update_listing(db, admin, app, {"screenshot_keys": [*current, *keys]})
+    await log_activity(
+        db, admin, "app.screenshots_added", "app", app["_id"], {"count": len(keys), "draft": bool(updated.get("listing_draft"))}
+    )
+    return app_admin(updated)
 
 
 def _key_from_url(url: str) -> str:
@@ -178,10 +355,11 @@ def _key_from_url(url: str) -> str:
 async def set_screenshots(db: Db, storage: StorageDep, admin: CurrentAdmin, app_id: str, body: ScreenshotsOrder):
     """Réordonne / retire des captures : la liste d'URLs envoyée devient la galerie."""
     app = await get_app_or_404(db, app_id)
-    current = app.get("screenshot_keys", [])
+    current = editable_listing(app).get("screenshot_keys") or []
     keys = [k for k in (_key_from_url(u) for u in body.urls) if k in current]
-    await db.apps.update_one({"_id": app["_id"]}, {"$set": {"screenshot_keys": keys, "updated_at": now()}})
-    for removed in set(current) - set(keys):
-        await storage.delete(removed)
-    await log_activity(db, admin, "app.screenshots_updated", "app", app["_id"], {"count": len(keys)})
-    return app_admin(await db.apps.find_one({"_id": app["_id"]}))
+    updated = await _update_listing(db, admin, app, {"screenshot_keys": keys})
+    await delete_unreferenced(storage, updated, set(current) - set(keys))
+    await log_activity(
+        db, admin, "app.screenshots_updated", "app", app["_id"], {"count": len(keys), "draft": bool(updated.get("listing_draft"))}
+    )
+    return app_admin(updated)

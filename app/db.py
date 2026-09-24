@@ -39,6 +39,11 @@ async def ensure_indexes(db: AsyncDatabase) -> None:
         unique=True,
         partialFilterExpression={"upload_status": "stored"},
     )
+    # Demandes de validation (file "À valider" de la console)
+    await db.versions.create_index("review.state", sparse=True)
+    await db.apps.create_index("status_request.state", sparse=True)
+    await db.apps.create_index("listing_review.state", sparse=True)
+    await db.apps.create_index("listing_draft.category_ids", sparse=True)
     await db.categories.create_index([("order", ASCENDING)])
     await db.users.create_index("email", unique=True, partialFilterExpression={"email": {"$type": "string"}})
     await db.users.create_index("device_id", unique=True, partialFilterExpression={"device_id": {"$type": "string"}})

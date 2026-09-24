@@ -47,6 +47,18 @@ MESSAGES: dict[str, dict[str, str]] = {
         "fr": "Numéro de version invalide : utilisez un numéro sémantique (ex. 1.4.2 ou 2.0.0-beta.1).",
         "en": "Invalid version number: use a semantic version (e.g. 1.4.2 or 2.0.0-beta.1).",
     },
+    "publish_requires_admin": {
+        "fr": "Seul un admin complet peut valider et publier. Soumettez votre demande pour validation.",
+        "en": "Only a full admin can approve and publish. Submit your request for review instead.",
+    },
+    "not_submittable": {
+        "fr": "Seule une version non publiée, validée par l'analyse de sécurité, peut être soumise.",
+        "en": "Only an unpublished version that passed the security scan can be submitted.",
+    },
+    "already_submitted": {"fr": "Une demande est déjà en attente de validation.", "en": "A request is already awaiting review."},
+    "review_not_pending": {"fr": "Aucune demande en attente de validation.", "en": "There is no request awaiting review."},
+    "no_listing_draft": {"fr": "Aucune modification de fiche en attente.", "en": "There are no pending listing changes."},
+    "status_unchanged": {"fr": "L'application a déjà ce statut.", "en": "The app already has this status."},
     "invalid_image": {"fr": "Image invalide (PNG, JPEG ou WebP).", "en": "Invalid image (PNG, JPEG or WebP)."},
 }
 

@@ -141,6 +141,20 @@ class ScreenshotsOrder(BaseModel):
     urls: list[str]
 
 
+# ---------- Circuit de validation
+class ReviewSubmit(BaseModel):
+    note: str = Field(default="", max_length=2000)
+
+
+class ReviewReject(BaseModel):
+    reason: str = Field(min_length=3, max_length=2000)
+
+
+class StatusRequestIn(BaseModel):
+    status: AppStatus
+    note: str = Field(default="", max_length=2000)
+
+
 # ---------- Versions
 class VersionUpdate(BaseModel):
     changelog: str | None = Field(default=None, max_length=20000)

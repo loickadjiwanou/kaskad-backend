@@ -219,10 +219,20 @@ Two independent scopes, each with its own tokens: **admin** (console) and **user
 
 | Role | Permissions |
 |---|---|
-| `admin` | Everything, including admin account management |
-| `editor` | Content: apps, versions, categories, publication, statistics, moderation |
+| `admin` | Everything: approves and publishes, manages admin accounts. The first admin is created at startup from `ADMIN_EMAIL` / `ADMIN_PASSWORD` |
+| `editor` | Prepares content (apps, listings, versions, categories) and **submits it for review**; cannot publish |
 
 The last active `admin` cannot be demoted or disabled.
+
+**Review workflow** (like Google Play Console): nothing goes live without a full admin.
+
+| What | Editor | Full admin |
+|---|---|---|
+| Version | `POST /admin/versions/{id}/submit` once the scan has passed | `publish` (approves the submission) or `reject` with a reason |
+| App status (publish / unpublish / draft) | `POST /admin/apps/{id}/status-request` | `status-request/approve` / `reject`, or `POST /admin/apps/{id}/status` directly |
+| Listing of a live app (texts, icon, screenshots, categories…) | Edits are saved in a **listing draft** (`draft` in the app response), invisible in the catalog; `listing/submit` | `listing/publish` (applies the draft) or `listing/reject` |
+
+Editing a submitted item cancels its submission (it must be submitted again). Editors can withdraw their own requests. Only a full admin can edit or archive a published version. Apps that are not live (draft / unpublished) are edited directly. Every step is recorded in the activity log.
 
 **End-user accounts** are optional: the client app works without one.
 
@@ -358,13 +368,21 @@ All routes require an admin access token. Routes marked **admin** require the `a
 | POST | `/admin/categories/{id}/reassign` | `{to_category_id, app_ids?}` → move apps |
 | GET / POST | `/admin/apps` | List (`status`, `q`, `category_id`, pagination, `pending_versions`) / create |
 | GET / PATCH | `/admin/apps/{id}` | Details / update |
-| POST | `/admin/apps/{id}/status` | `{status: draft\|published\|archived}` |
-| GET | `/admin/apps/{id}/preview` | App as displayed in the client app, whatever its status |
+| POST | `/admin/apps/{id}/status` | **admin** — `{status: draft\|published\|archived}` |
+| POST / DELETE | `/admin/apps/{id}/status-request` | Request a status change `{status, note}` / withdraw it |
+| POST | `/admin/apps/{id}/status-request/approve` · `/reject` | **admin** — approve / reject (`{reason}`) |
+| POST | `/admin/apps/{id}/listing/submit` | Submit the listing draft for review (`{note}`) |
+| POST | `/admin/apps/{id}/listing/publish` · `/reject` | **admin** — make the draft live / reject it (`{reason}`) |
+| DELETE | `/admin/apps/{id}/listing` · `/listing/review` | Discard the listing draft / withdraw its submission |
+| GET | `/admin/apps/{id}/preview` | App as displayed in the client app, whatever its status (`?draft=true`: with the listing draft) |
 | POST | `/admin/apps/{id}/icon` | Multipart `file` (PNG, JPEG, WebP, 10 MB max) |
 | POST / PUT | `/admin/apps/{id}/screenshots` | Add (multipart `files`, 12 max) / reorder or remove (`{urls}`) |
 | GET / POST | `/admin/apps/{id}/versions` | List / upload (multipart: `file`, `version_name`, `version_code`, `platform`, `file_format`, `changelog`) |
-| GET / PATCH | `/admin/versions/{id}` | Details with scan report / update changelog or version name |
-| POST | `/admin/versions/{id}/publish` · `/archive` · `/rescan` | Lifecycle actions |
+| GET / PATCH | `/admin/versions/{id}` | Details with scan report and review / update changelog or version name (published versions: **admin**) |
+| POST | `/admin/versions/{id}/submit` | Submit a version that passed the scan for review (`{note}`) |
+| POST | `/admin/versions/{id}/publish` · `/reject` | **admin** — publish (approves the submission) / reject (`{reason}`) |
+| DELETE | `/admin/versions/{id}/submission` | Withdraw a submission |
+| POST | `/admin/versions/{id}/archive` · `/rescan` | Archive (published versions: **admin**) / scan again |
 | GET | `/admin/versions/{id}/download-url` | Signed link for the console (not counted in statistics) |
 | GET | `/admin/stats/overview` | Apps per status, total downloads, last 30 days, pending reviews, recent publications |
 | GET | `/admin/stats/downloads` | Time series: `from`, `to`, `interval` (`day`, `week`, `month`), `app_id`, `version_id` |
@@ -372,6 +390,7 @@ All routes require an admin access token. Routes marked **admin** require the `a
 | GET | `/admin/stats/top-apps` | Most downloaded apps over a period |
 | GET | `/admin/stats/export.csv` | CSV export (one line per download) |
 | GET | `/admin/moderation/queue` | Versions not published yet (scanning, rejected or awaiting publication) |
+| GET | `/admin/moderation/reviews` | Review requests (pending or rejected): versions, status requests, listing drafts |
 | GET | `/admin/activity` | Activity log (`action` prefix, `actor_id`, pagination) |
 
 ---
@@ -393,8 +412,8 @@ Main codes: `not_authenticated`, `invalid_token`, `forbidden`, `invalid_credenti
 
 | Collection | Main fields |
 |---|---|
-| `apps` | `name`, `short_description`, `long_description`, `icon_key`, `screenshot_keys`, `category_ids`, `target_platforms`, `featured`, `status`, `android_package`, `available_platforms`, `latest_version_name`, `last_published_at`, `downloads_count`, `created_at`, `updated_at` |
-| `versions` | `app_id`, `version_name`, `version_code`, `platform`, `file_format`, `storage_key`, `file_name`, `file_size`, `sha256_hash`, `changelog`, `status`, `upload_status`, `security_scan_status`, `scan_report`, `apk_info`, `downloads_count`, `published_at`, `created_by`, `created_at` |
+| `apps` | `name`, `short_description`, `long_description`, `icon_key`, `screenshot_keys`, `category_ids`, `target_platforms`, `featured`, `status`, `android_package`, `listing_draft`, `listing_review`, `status_request`, `available_platforms`, `latest_version_name`, `last_published_at`, `downloads_count`, `created_at`, `updated_at` |
+| `versions` | `app_id`, `version_name`, `version_code`, `platform`, `file_format`, `storage_key`, `file_name`, `file_size`, `sha256_hash`, `changelog`, `status`, `upload_status`, `security_scan_status`, `scan_report`, `apk_info`, `review`, `downloads_count`, `published_at`, `created_by`, `created_at` |
 | `categories` | `name`, `icon`, `order` |
 | `users` | `email`, `password_hash`, `anonymous`, `device_id`, `favorites`, `followed_apps [{app_id, notify}]`, `installed_apps [{app_id, version_id}]`, `push_tokens [{token, provider, platform, language}]` |
 | `admins` | `email`, `password_hash`, `name`, `role`, `active`, `last_login_at` |
@@ -438,6 +457,7 @@ The suite starts a **real `mongod`** (downloaded once into `.mongo-bin/`, no Doc
 
 - full catalog flow: upload → scan → publish → public catalog → download (with `Range`) → statistics;
 - authentication: refresh rotation, roles, rate limiting;
+- review workflow: submissions, approvals, rejections, listing drafts;
 - security: fake clamd detecting EICAR, format checks, APK certificate continuity, required antivirus;
 - S3 storage against a local S3 server (moto);
 - push notifications with a fake sender;

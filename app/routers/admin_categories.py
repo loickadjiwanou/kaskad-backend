@@ -63,13 +63,18 @@ async def reorder_categories(db: Db, admin: CurrentAdmin, body: CategoryOrder):
 
 
 async def _move_apps(db, source, target, app_ids=None) -> int:
-    flt: dict = {"category_ids": source}
-    if app_ids is not None:
-        flt["_id"] = {"$in": app_ids}
-    # Ajout de la nouvelle catégorie puis retrait de l'ancienne (évite les doublons)
-    await db.apps.update_many(flt, {"$addToSet": {"category_ids": target}})
-    res = await db.apps.update_many(flt, {"$pull": {"category_ids": source}, "$set": {"updated_at": now()}})
-    return res.modified_count
+    moved = 0
+    # Fiches en ligne puis brouillons de fiche (modifications en attente de validation)
+    for field in ("category_ids", "listing_draft.category_ids"):
+        flt: dict = {field: source}
+        if app_ids is not None:
+            flt["_id"] = {"$in": app_ids}
+        # Ajout de la nouvelle catégorie puis retrait de l'ancienne (évite les doublons)
+        await db.apps.update_many(flt, {"$addToSet": {field: target}})
+        res = await db.apps.update_many(flt, {"$pull": {field: source}, "$set": {"updated_at": now()}})
+        if field == "category_ids":
+            moved = res.modified_count
+    return moved
 
 
 @router.post("/{category_id}/reassign")
@@ -86,7 +91,7 @@ async def reassign_apps(db: Db, admin: CurrentAdmin, category_id: str, body: Cat
 async def delete_category(db: Db, admin: CurrentAdmin, category_id: str, reassign_to: str | None = None):
     """Supprime une catégorie. Si des apps l'utilisent, `reassign_to` est obligatoire (les apps y sont déplacées)."""
     cat = await _get(db, category_id)
-    in_use = await db.apps.count_documents({"category_ids": cat["_id"]})
+    in_use = await db.apps.count_documents({"$or": [{"category_ids": cat["_id"]}, {"listing_draft.category_ids": cat["_id"]}]})
     if in_use:
         if not reassign_to:
             raise ApiError(409, "category_in_use")
