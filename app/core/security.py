@@ -41,6 +41,14 @@ def create_token(subject: str, scope: Scope, kind: Literal["access", "refresh"],
     return jwt.encode(payload, s.jwt_secret, algorithm=s.jwt_algorithm), jti, expires
 
 
+def create_mfa_token(subject: str) -> str:
+    """Jeton court remis après le mot de passe, échangé contre une session avec le code TOTP."""
+    s = get_settings()
+    now = datetime.now(UTC)
+    payload = {"sub": subject, "scope": "admin", "typ": "mfa", "iat": now, "exp": now + timedelta(minutes=s.mfa_token_ttl_minutes)}
+    return jwt.encode(payload, s.jwt_secret, algorithm=s.jwt_algorithm)
+
+
 def decode_token(token: str) -> dict:
     s = get_settings()
     return jwt.decode(token, s.jwt_secret, algorithms=[s.jwt_algorithm])

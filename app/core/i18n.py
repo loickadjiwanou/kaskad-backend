@@ -97,6 +97,29 @@ MESSAGES: dict[str, dict[str, str]] = {
         "en": "Create an account with an email address to post a review.",
     },
     "invalid_image": {"fr": "Image invalide (PNG, JPEG ou WebP).", "en": "Invalid image (PNG, JPEG or WebP)."},
+    "mfa_setup_required": {
+        "fr": "Activez la double authentification sur votre compte pour continuer.",
+        "en": "Turn on two-step verification on your account to continue.",
+    },
+    "mfa_invalid_code": {"fr": "Code incorrect ou expiré.", "en": "Incorrect or expired code."},
+    "mfa_token_invalid": {
+        "fr": "La vérification a expiré : reconnectez-vous.",
+        "en": "Verification expired: sign in again.",
+    },
+    "mfa_not_enabled": {"fr": "La double authentification n'est pas activée.", "en": "Two-step verification is not turned on."},
+    "mfa_already_enabled": {"fr": "La double authentification est déjà activée.", "en": "Two-step verification is already on."},
+    "mfa_setup_missing": {
+        "fr": "Commencez par générer une clé de configuration.",
+        "en": "Start by generating a setup key.",
+    },
+    "mfa_cannot_disable": {
+        "fr": "La double authentification est obligatoire pour ce compte : elle ne peut pas être désactivée.",
+        "en": "Two-step verification is required for this account: it can't be turned off.",
+    },
+    "mfa_enable_first": {
+        "fr": "Activez d'abord la double authentification sur votre propre compte.",
+        "en": "Turn on two-step verification on your own account first.",
+    },
 }
 
 

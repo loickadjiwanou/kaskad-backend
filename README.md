@@ -15,7 +15,7 @@ The API serves three consumers:
 1. [Architecture](#architecture)
 2. [Features](#features)
 3. [Getting started](#getting-started)
-4. [Running with Docker](#running-with-docker)
+4. [Running with Docker](#running-with-docker) — local stack and [production deployment](deploy/README.md)
 5. [Configuration](#configuration)
 6. [Authentication and roles](#authentication-and-roles)
 7. [Version lifecycle](#version-lifecycle) — beta channel, scheduled releases, languages
@@ -28,8 +28,9 @@ The API serves three consumers:
 14. [Data model](#data-model)
 15. [Project structure](#project-structure)
 16. [Tests](#tests)
-17. [Production checklist](#production-checklist)
-18. [Troubleshooting](#troubleshooting)
+17. [Continuous integration](#continuous-integration)
+18. [Production checklist](#production-checklist)
+19. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -65,7 +66,8 @@ The API serves three consumers:
 | Storage | S3-compatible (MinIO, Backblaze B2) or local disk, signed temporary download URLs (anti-hotlinking), resumable downloads (`Range`), automatic cleanup of incomplete uploads and orphan files |
 | Categories | CRUD (name, icon, order), reordering, reassigning apps between categories, safe deletion |
 | Security | ClamAV and/or VirusTotal, file format checks, APK manifest analysis and signing certificate continuity, Authenticode verification for EXE, no file is ever executed |
-| Statistics | Download counters per app and version, time series, breakdown (platform, format, version), top apps, CSV export |
+| Statistics | Downloads and app page views (Kaskad app + public web page), unique visitors, conversion rate, time series, breakdown (platform, format, version, country, traffic source), top apps, versions actually installed on active devices, CSV export |
+| Two-step verification | TOTP (authenticator apps) + single-use recovery codes for the console; required for the platform admin, optionally required by an account owner for all members; reset by the owner for a lost device |
 | Moderation | Queue of versions awaiting validation, app reports and reported user reviews, activity log (who did what, when) |
 | Ratings & reviews | 1–5 star ratings and reviews from email accounts (one per app, editable), aggregates on the app (average, count, distribution), public developer replies (author notified by email), review reports, hide / restore by the platform admin |
 | Reports | Users report apps (malware, abusive content, copyright, misleading, broken, other) with or without an account; the platform admin is emailed and resolves them (dismiss, handle, unpublish) |
@@ -160,6 +162,13 @@ docker compose up --build
 Default credentials (`kaskad` / `kaskad-mongo-secret`, `kaskad` / `kaskad-minio-secret`) are for local use only: override them in `.env`.
 The MongoDB account is created only when the `mongo-data` volume is empty.
 
+**Production:** [`deploy/`](deploy/README.md) contains a complete stack for a server — API, console, MongoDB, MinIO, ClamAV and Caddy (automatic HTTPS) — with an environment template and a backup script:
+
+```bash
+cd deploy && cp .env.production.example .env.production   # fill in domains and secrets
+docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+```
+
 ---
 
 ## Configuration
@@ -195,6 +204,16 @@ All settings are environment variables, read from the process environment or fro
 | `USER_ACCESS_TTL_MINUTES` / `USER_REFRESH_TTL_DAYS` | 60 / 90 | End-user session lifetimes |
 | `LOGIN_MAX_ATTEMPTS` / `LOGIN_WINDOW_MINUTES` | 10 / 15 | Login attempts allowed per account and IP address |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | — | The **platform admin** (unique), created at startup if missing |
+| `ADMIN_REQUIRE_2FA` | `true` | The platform admin must set up two-step verification before using the console |
+| `MFA_TOKEN_TTL_MINUTES` | 5 | Time allowed to enter the code after the password |
+
+### Statistics
+
+| Variable | Default | Description |
+|---|---|---|
+| `GEOIP_HEADER` | — | Header carrying the visitor's country set by a CDN or proxy (e.g. `CF-IPCountry` behind Cloudflare) |
+| `GEOIP_DATABASE` | — | Local country database (`.mmdb`: MaxMind GeoLite2 or DB-IP Lite) used when no header is available |
+| `INSTALLATIONS_ACTIVE_DAYS` | 30 | A device that hasn't checked for updates for longer no longer counts as an installation |
 
 ### Emails (Brevo)
 
@@ -255,6 +274,14 @@ Two independent scopes, each with its own tokens: **admin** (console) and **user
 - **Refresh token:** single use. Each refresh returns a new pair and invalidates the old token, so a reused token is rejected. Refresh tokens are stored (with automatic expiry) so they can be revoked: logout, disabled admin, password change, account deletion.
 - **Passwords:** hashed with Argon2id.
 - **Rate limiting:** failed logins are limited per account and IP address (`429 too_many_attempts`, with `retry_after`). The limiter is in memory; use a shared store (e.g. Redis) if you run several API instances.
+
+**Two-step verification (console)**
+
+- Setup: `POST /admin/auth/2fa/setup` (password) returns a key and an `otpauth://` URL (QR code); `POST /admin/auth/2fa/enable` confirms it with a first code and returns 10 **recovery codes** (shown once, stored as hashes).
+- Sign-in: with two-step verification on, `POST /admin/auth/login` (and `reset-password`) returns `{mfa_required: true, mfa_token}` instead of a session; `POST /admin/auth/login/2fa` exchanges the token (5 min) and a 6-digit code or a recovery code for a session. Codes can't be reused (last counter stored), attempts are rate-limited, using a recovery code sends an alert email.
+- The TOTP key is encrypted in the database with a key derived from `JWT_SECRET`.
+- **Required** for the platform admin (`ADMIN_REQUIRE_2FA`) and for all members of an account whose owner turned it on (`PATCH /admin/account {require_2fa}`): until it is set up, every console route answers `403 mfa_setup_required` except the profile and the setup routes. It can't be turned off while required.
+- Lost phone: the owner (or the platform admin) resets a member's two-step verification (`POST /admin/members/{id}/reset-2fa`); the member's sessions are closed and they are emailed. Email alerts are also sent when it is turned on or off.
 
 **Developer accounts and roles** (like Google Play Console)
 
@@ -405,7 +432,8 @@ Base URL: `/api/v1`. Full schemas and a test console at **`/api/v1/docs`**.
 | GET | `/developers/{id}` | Developer account `{id, name, apps_count}`; its apps: `GET /apps?developer_id=` |
 | GET | `/apps/{id}/versions?platform=` | Published versions |
 | GET | `/versions/{id}/download?platform=` | Counts the download and redirects (302) to the signed file URL |
-| POST | `/updates/check` | `{installed: [{app_id, version_id, version_code, platform}]}` → `[{app_id, latest_version}]` |
+| POST | `/updates/check` | `{installed: [{app_id, version_id, version_code, platform}], device_id?}` → `[{app_id, latest_version}]`; with `device_id` (random, hashed server-side) the installed versions feed the statistics |
+| POST | `/apps/{id}/view` | `{platform, device_id}` — app page viewed in the client app (one view per visitor and app every 30 min) |
 | GET | `/media/{key}` | Icons and screenshots |
 | GET | `/files/{key}?exp=&sig=&name=` | Signed file download (local storage) |
 | GET | `/apps/{id}/reviews` | Visible reviews: `sort` (`recent`, `rating_desc`, `rating_asc`), `rating` (1–5), `page`, `limit` → `{items, total, rating: {average, count, distribution}}`; `is_mine` with a user token |
@@ -442,14 +470,18 @@ Routes require a console access token, except sign-up, email confirmation and in
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/admin/auth/login` · `/refresh` · `/logout` | Session (`{access_token, refresh_token, admin}`) |
+| POST | `/admin/auth/login` · `/refresh` · `/logout` | Session (`{access_token, refresh_token, admin}`), or `{mfa_required, mfa_token}` when two-step verification is on |
+| POST | `/admin/auth/login/2fa` | `{mfa_token, code}` (6-digit code or recovery code) → session |
+| GET | `/admin/auth/2fa` | Two-step verification status (`enabled`, `required`, `recovery_codes_left`) |
+| POST | `/admin/auth/2fa/setup` · `/enable` · `/disable` · `/recovery-codes` | `{password}` → key + `otpauth_url` / `{code}` → recovery codes / `{password, code}` / `{code}` → new recovery codes |
+| POST | `/admin/members/{id}/reset-2fa` | **owner** — reset a member's two-step verification (lost device) |
 | POST | `/admin/auth/signup` | Public — `{name, email, password, account_name}`: creates a developer account and sends the confirmation email |
 | POST | `/admin/auth/verify-email` | Public — `{token}` from the email: confirms the address and returns a session |
 | POST | `/admin/auth/resend-verification` | Public — `{email}` (same answer whether the address exists or not) |
 | POST | `/admin/auth/forgot-password` | Public — `{email}`: emails a reset link (same answer whether the address exists or not) |
 | POST | `/admin/auth/reset-password` | Public — `{token, password}`: new password, other sessions revoked, returns a session |
 | GET / PATCH | `/admin/auth/me` | Own profile with `account` (name, password change with current password) |
-| PATCH | `/admin/account` | **owner** — rename the developer account |
+| PATCH | `/admin/account` | **owner** — `{name, require_2fa}`: rename the account, require two-step verification for all members |
 | GET | `/admin/accounts` | **admin** — every developer account (owner, members, apps, suspension) |
 | PATCH | `/admin/accounts/{id}` | **admin** — `{suspended, reason}`: suspend or reactivate a developer account |
 | GET | `/admin/members` | Members of the account (`?account_id=` for the platform admin) |
@@ -484,9 +516,11 @@ Routes require a console access token, except sign-up, email confirmation and in
 | POST | `/admin/versions/{id}/archive` · `/rescan` | Archive (published versions: **admin**) / scan again |
 | GET | `/admin/versions/{id}/download-url` | Signed link for the console (not counted in statistics) |
 | GET | `/admin/stats/overview` | Apps per status, total downloads, last 30 days, pending reviews, recent publications |
-| GET | `/admin/stats/downloads` | Time series: `from`, `to`, `interval` (`day`, `week`, `month`), `app_id`, `version_id` |
-| GET | `/admin/stats/breakdown` | Downloads by `platform`, `file_format`, `version_id` or `app_id` |
-| GET | `/admin/stats/top-apps` | Most downloaded apps over a period |
+| GET | `/admin/stats/downloads` | Time series: `from`, `to`, `interval` (`day`, `week`, `month`), `app_id`, `version_id`, `metric` (`downloads` or `views`) |
+| GET | `/admin/stats/breakdown` | Downloads or views (`metric`) by `platform`, `file_format`, `version_id`, `app_id`, `country` or `source` (views: `app` / `web`) |
+| GET | `/admin/stats/funnel` | Page views, unique visitors, downloads and conversion rate over a period |
+| GET | `/admin/stats/installed` | Versions actually installed on active devices: per version (`app_id`, with `on_latest`) or per app |
+| GET | `/admin/stats/top-apps` | Most downloaded apps over a period, with views and conversion |
 | GET | `/admin/stats/export.csv` | CSV export (one line per download) |
 | GET | `/admin/moderation/queue` | **admin** — Versions not published yet (scanning, rejected or awaiting publication) |
 | GET | `/admin/moderation/reviews` | **admin** — Review requests (pending or rejected): versions, status requests, listing drafts |
@@ -571,7 +605,23 @@ The suite starts a **real `mongod`** (downloaded once into `.mongo-bin/`, no Doc
 - security: fake clamd detecting EICAR, format checks, APK certificate continuity, required antivirus;
 - S3 storage against a local S3 server (moto);
 - push notifications with a fake sender;
-- cleanup, categories, CSV export, localized errors.
+- cleanup, categories, CSV export, localized errors;
+- two-step verification (RFC 6238 test vector, setup, sign-in, replay, recovery codes, required setup, owner reset);
+- statistics: page views and deduplication, conversion, countries, traffic sources, installed versions.
+
+---
+
+## Continuous integration
+
+Each repository has a GitHub Actions workflow (`.github/workflows/ci.yml`) on pushes to `main` and pull requests:
+
+| Repository | Checks |
+|---|---|
+| `kaskad-backend` | Ruff (lint + format), full test suite against a MongoDB 7 service (`TEST_MONGODB_URI`), Docker image build |
+| `kaskad-console` | ESLint, translation check (`yarn check:i18n`), production build, Docker image build |
+| `kaskad-mobile` | Translation check (`yarn check:i18n`), web export (also used by the desktop app) |
+
+Locally, `TEST_MONGODB_URI=mongodb://localhost:27017 pytest` runs the suite against an existing MongoDB instead of the in-memory one.
 
 ---
 
@@ -584,6 +634,8 @@ The suite starts a **real `mongod`** (downloaded once into `.mongo-bin/`, no Doc
 - HTTPS reverse proxy in front of the API (uvicorn runs with `--proxy-headers`), `PUBLIC_BASE_URL` set to the public HTTPS URL
 - `CORS_ORIGINS` restricted to the real console and client origins
 - Push credentials outside the repository (`FIREBASE_CREDENTIALS_FILE`, APNs key)
+- Two-step verification set up for the platform admin (required by default)
+- Optional: `GEOIP_HEADER` or `GEOIP_DATABASE` for statistics by country
 - A shared rate limit store if several API instances run
 
 ---

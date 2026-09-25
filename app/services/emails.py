@@ -294,6 +294,22 @@ NOTIFICATIONS = {
             "Compte suspendu : {account}",
             "Le compte développeur « {account} » a été suspendu par l'administrateur de la plateforme. Ses applications ne sont plus visibles dans le store et ses membres ne peuvent plus se connecter.",
         ),
+        "mfa_enabled": (
+            "Double authentification activée",
+            "La double authentification vient d'être activée sur votre compte Kaskad Console. Chaque connexion demandera désormais un code de votre application d'authentification.",
+        ),
+        "mfa_disabled": (
+            "Double authentification désactivée",
+            "La double authentification a été désactivée sur votre compte Kaskad Console. Si ce n'est pas vous, changez votre mot de passe immédiatement.",
+        ),
+        "mfa_reset": (
+            "Double authentification réinitialisée",
+            "{member} a réinitialisé la double authentification de votre compte (appareil perdu). Configurez-la de nouveau à votre prochaine connexion.",
+        ),
+        "mfa_recovery_used": (
+            "Code de secours utilisé",
+            "Un code de secours vient d'être utilisé pour vous connecter à Kaskad Console. Il vous en reste {count}. Si ce n'est pas vous, changez votre mot de passe.",
+        ),
         "account_reactivated": (
             "Compte réactivé : {account}",
             "Le compte développeur « {account} » a été réactivé. Ses applications sont de nouveau visibles et ses membres peuvent se connecter.",
@@ -318,6 +334,22 @@ NOTIFICATIONS = {
         "account_suspended": (
             "Account suspended: {account}",
             "The developer account “{account}” was suspended by the platform admin. Its apps are no longer visible in the store and its members can no longer sign in.",
+        ),
+        "mfa_enabled": (
+            "Two-step verification turned on",
+            "Two-step verification was just turned on for your Kaskad Console account. Every sign-in will now ask for a code from your authenticator app.",
+        ),
+        "mfa_disabled": (
+            "Two-step verification turned off",
+            "Two-step verification was turned off for your Kaskad Console account. If this wasn't you, change your password right away.",
+        ),
+        "mfa_reset": (
+            "Two-step verification reset",
+            "{member} reset two-step verification on your account (lost device). Set it up again at your next sign-in.",
+        ),
+        "mfa_recovery_used": (
+            "Recovery code used",
+            "A recovery code was just used to sign in to Kaskad Console. You have {count} left. If this wasn't you, change your password.",
         ),
         "account_reactivated": (
             "Account reactivated: {account}",
@@ -357,7 +389,7 @@ def notification_email(lang: str, kind: str, to_email: str, name: str, url: str,
         ctx["subject"] = SUBJECT_LABELS[lang][ctx.pop("subject_kind")].format(**ctx)
     subject, body = NOTIFICATIONS[lang][kind]
     t = NOTIFICATION_TEXT[lang]
-    fmt = {"app": "", "version": "", "account": "", "member": "", "status": "", "subject": "", "date": "", **ctx}
+    fmt = {"app": "", "version": "", "account": "", "member": "", "status": "", "subject": "", "date": "", "count": "", **ctx}
     title = subject.format(**fmt)
     paragraphs = [t["greeting"].format(name=name or ""), body.format(**fmt)]
     if ctx.get("reason") and kind != "app_reported":

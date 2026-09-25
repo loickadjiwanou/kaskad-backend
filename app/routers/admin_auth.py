@@ -15,10 +15,10 @@ from pymongo.errors import DuplicateKeyError
 
 from app.core.config import get_settings
 from app.core.i18n import ApiError, language
-from app.core.security import hash_password, verify_password
+from app.core.security import create_mfa_token, hash_password, verify_password
 from app.deps import CurrentAdmin, Db, FullAdmin, LoginLimiter, MailerDep, TeamManager
 from app.models.common import maybe_oid, now, oid, sid
-from app.models.schemas import AdminSession, EmailPassword, RefreshIn
+from app.models.schemas import AdminSession, EmailPassword, MfaChallenge, RefreshIn
 from app.services.accounts import (
     INVITABLE_ROLES,
     OWNER,
@@ -31,6 +31,7 @@ from app.services.activity import log_activity
 from app.services.api_keys import api_key_out, new_api_key
 from app.services.auth import issue_tokens, revoke_all, revoke_refresh_token, rotate_refresh_token
 from app.services.emails import invitation_email, reset_password_email, verification_email
+from app.services.mfa import mfa_enabled, mfa_mandatory, mfa_setup_required
 from app.services.notify import notify_member
 
 router = APIRouter(prefix="/admin", tags=["admin: auth & team"])
@@ -46,6 +47,13 @@ def admin_out(a: dict, account: dict | None = None) -> dict:
         "email_verified": a.get("email_verified", True),
         "account_id": sid(a.get("account_id")),
         **({"account": account_out(account)} if account is not None else {}),
+        # Double authentification : activée, obligatoire, à configurer avant d'accéder à la console
+        "mfa_enabled": mfa_enabled(a),
+        **(
+            {"mfa_required": mfa_mandatory(a, account), "mfa_setup_required": mfa_setup_required(a, account)}
+            if account is not None or a.get("role") == PLATFORM_ADMIN
+            else {}
+        ),
         "created_at": a.get("created_at"),
         "last_login_at": a.get("last_login_at"),
     }
@@ -92,7 +100,14 @@ async def _session(db, admin: dict) -> dict:
 # ---------------------------------------------------------------- connexion
 
 
-@router.post("/auth/login", response_model=AdminSession)
+async def session_or_challenge(db, admin: dict) -> dict:
+    """Session directe, ou demande du code quand la double authentification est activée."""
+    if mfa_enabled(admin):
+        return {"mfa_required": True, "mfa_token": create_mfa_token(sid(admin["_id"]))}
+    return await _session(db, admin)
+
+
+@router.post("/auth/login", response_model=AdminSession | MfaChallenge)
 async def login(db: Db, request: Request, limiter: LoginLimiter, body: EmailPassword):
     limiter.check(request, f"admin:{body.email}")
     admin = await db.admins.find_one({"email": body.email.lower()})
@@ -105,7 +120,7 @@ async def login(db: Db, request: Request, limiter: LoginLimiter, body: EmailPass
     await _ensure_account_active(db, admin)
     limiter.reset(request, f"admin:{body.email}")
     await _remember_language(db, admin, request)
-    return await _session(db, admin)
+    return await session_or_challenge(db, admin)
 
 
 @router.post("/auth/refresh")
@@ -244,7 +259,7 @@ class ResetIn(BaseModel):
     password: str = Field(min_length=8, max_length=256)
 
 
-@router.post("/auth/reset-password", response_model=AdminSession)
+@router.post("/auth/reset-password", response_model=AdminSession | MfaChallenge)
 async def reset_password(db: Db, request: Request, body: ResetIn):
     """Nouveau mot de passe depuis le lien reçu : les autres sessions sont révoquées, une nouvelle session est ouverte."""
     stored = await db.email_tokens.find_one_and_delete({"token_hash": _hash(body.token), "kind": "reset"})
@@ -261,7 +276,8 @@ async def reset_password(db: Db, request: Request, body: ResetIn):
     await revoke_all(db, admin["_id"])
     await log_activity(db, admin, "member.password_reset", "admin", admin["_id"])
     await _remember_language(db, admin, request)
-    return await _session(db, await db.admins.find_one({"_id": admin["_id"]}))
+    # Le lien de réinitialisation ne suffit pas : la double authentification reste demandée
+    return await session_or_challenge(db, await db.admins.find_one({"_id": admin["_id"]}))
 
 
 # ---------------------------------------------------------------- profil et compte
@@ -294,15 +310,26 @@ async def update_me(db: Db, admin: CurrentAdmin, body: ProfileUpdate):
 
 
 class AccountUpdate(BaseModel):
-    name: str = Field(min_length=2, max_length=80)
+    name: str | None = Field(default=None, min_length=2, max_length=80)
+    # Double authentification exigée pour tous les membres du compte
+    require_2fa: bool | None = None
 
 
 @router.patch("/account")
-async def rename_account(db: Db, admin: TeamManager, body: AccountUpdate):
-    """Renomme le compte développeur (propriétaire)."""
-    await db.accounts.update_one({"_id": admin["account_id"]}, {"$set": {"name": body.name.strip(), "updated_at": now()}})
-    await db.apps.update_many({"account_id": admin["account_id"]}, {"$set": {"account_name": body.name.strip()}})
-    await log_activity(db, admin, "account.renamed", "account", admin["account_id"], {"name": body.name})
+async def update_account(db: Db, admin: TeamManager, body: AccountUpdate):
+    """Compte développeur (propriétaire) : nom, double authentification obligatoire pour les membres."""
+    if body.name:
+        await db.accounts.update_one({"_id": admin["account_id"]}, {"$set": {"name": body.name.strip(), "updated_at": now()}})
+        await db.apps.update_many({"account_id": admin["account_id"]}, {"$set": {"account_name": body.name.strip()}})
+        await log_activity(db, admin, "account.renamed", "account", admin["account_id"], {"name": body.name})
+    if body.require_2fa is not None:
+        # Le propriétaire active d'abord la double authentification sur son propre compte
+        if body.require_2fa and not mfa_enabled(admin):
+            raise ApiError(400, "mfa_enable_first")
+        await db.accounts.update_one({"_id": admin["account_id"]}, {"$set": {"require_2fa": body.require_2fa, "updated_at": now()}})
+        await log_activity(
+            db, admin, "account.2fa_required" if body.require_2fa else "account.2fa_optional", "account", admin["account_id"]
+        )
     return account_out(await _account(db, admin))
 
 

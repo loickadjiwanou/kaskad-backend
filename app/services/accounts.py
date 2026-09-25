@@ -56,7 +56,14 @@ async def scoped_app_ids(db: AsyncDatabase, admin: dict, account_id=None) -> lis
 def account_out(acc: dict | None) -> dict | None:
     if not acc:
         return None
-    return {"id": sid(acc["_id"]), "name": acc["name"], "owner_id": sid(acc.get("owner_id")), "created_at": acc.get("created_at")}
+    return {
+        "id": sid(acc["_id"]),
+        "name": acc["name"],
+        "owner_id": sid(acc.get("owner_id")),
+        # Double authentification exigée par le propriétaire pour tous les membres
+        "require_2fa": bool(acc.get("require_2fa")),
+        "created_at": acc.get("created_at"),
+    }
 
 
 async def create_account(db: AsyncDatabase, name: str, owner_id=None) -> dict:

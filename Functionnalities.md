@@ -55,10 +55,12 @@ The backend serves two clients: the **client app** (mobile + desktop, public API
 - **Roles:** `admin` (platform admin, unique: `ADMIN_EMAIL`, never assignable), `owner`, `developer`, `viewer`.
 - **Sign up:** creates a developer account and its owner; confirmation email (48 h link) in the console language; sign-in refused until confirmed; resend confirmation (same answer for unknown addresses).
 - **Sign in / refresh / sign out**, profile update, password change, member language remembered (used for emails).
-- **Forgot / reset password:** emailed link (1 h, single use), other sessions revoked, returns a session.
+- **Forgot / reset password:** emailed link (1 h, single use), other sessions revoked, returns a session (or the two-step verification challenge when it is on).
+- **Two-step verification (TOTP):** setup with password → key + `otpauth://` URL (QR code) → confirmation code → 10 single-use recovery codes (hashes stored); sign-in in two steps (`mfa_token` valid 5 min, then a 6-digit code or a recovery code); codes can't be replayed (last counter stored), ±30 s clock tolerance, attempts rate-limited; turn off with password + code; new recovery codes with a code; TOTP key encrypted in the database. Emails when it's turned on / off, reset, or when a recovery code is used.
+- **Required two-step verification:** for the platform admin (`ADMIN_REQUIRE_2FA`, default on) and for every member of an account whose owner requires it (`require_2fa`, the owner must have it on first); until set up, every console route answers `403 mfa_setup_required` except the profile and the setup routes; can't be turned off while required. The owner (or the platform admin) resets a member's two-step verification after a lost device (sessions closed, member emailed).
 - **Team:** list members, change role (developer / viewer), deactivate / reactivate (sessions revoked); the owner and the platform admin can't be modified (except suspension of an owner by the platform admin).
 - **Invitations:** invite by email with a role; email in the console language; resend (new link), revoke; public lookup and acceptance (creates the member and returns a session); one account per person.
-- **Account:** rename (propagated to the apps' developer name).
+- **Account:** rename (propagated to the apps' developer name); require two-step verification for all members.
 - **Developer accounts (platform admin):** list with owner, members, apps and suspension; **suspend / reactivate** an account (apps hidden from the store, members' sessions refused and revoked, invitations blocked, owner emailed with the reason).
 - **API keys:** create (key shown once, only the SHA-256 is stored), list, revoke; a key authenticates as a developer of its account (`Authorization: Bearer ksk_…`), last use tracked.
 - **Isolation:** every console route is scoped to the member's account (apps, versions, statistics, moderation, activity); the platform admin sees everything and can filter by account.
@@ -133,8 +135,12 @@ The backend serves two clients: the **client app** (mobile + desktop, public API
 
 ## 12. Statistics
 
-- Overview (apps per status, total downloads, last 30 days, pending versions, requests to review, latest releases).
-- Downloads over time (day / week / month), breakdown by platform, format, version or app, top apps, CSV export (account, app, version, platform, format).
+- Overview (apps per status, total downloads, last 30 days, page views and conversion over 30 days, pending versions, requests to review, latest releases).
+- **Page views:** app page opened in the client app (`POST /apps/{id}/view`) or public web page `/a/{id}` (robots and link previews ignored); one view per visitor (account, device or hashed IP) and app every 30 minutes; source `app` / `web`.
+- **Funnel:** page views, unique visitors, downloads and conversion rate (downloads ÷ views) over a period, for an app, an account or the platform; top apps with views and conversion.
+- **Countries:** country of each download and view from a CDN header (`GEOIP_HEADER`, e.g. `CF-IPCountry`) or a local GeoIP database (`GEOIP_DATABASE`); the IP address is never stored.
+- **Versions actually installed:** each device reports its installed apps and versions during the update check (random device id, hashed); active devices (seen in the last 30 days) per version with the share on the latest version, or per app.
+- Time series (day / week / month) of downloads or views, breakdown by platform, format, version, app, country or source, CSV export (account, app, version, platform, format, country).
 - Scoped to the member's account; the platform admin sees everything or one account.
 
 ---
@@ -174,5 +180,7 @@ The backend serves two clients: the **client app** (mobile + desktop, public API
 - Localized errors (`{detail, code}`) in French or English from `Accept-Language`, with parameters (e.g. required number of testers).
 - CORS configuration, environment-based settings (`.env`), production safety checks (JWT secret).
 - MongoDB indexes created at startup; seed script for demo data.
-- Docker / docker-compose files.
+- Docker image (non-root user, health check) and a local docker-compose (API, MongoDB, MinIO, ClamAV).
+- **Production deployment** (`deploy/`): full docker-compose (API, console, MongoDB with authentication, MinIO, ClamAV, Caddy with automatic HTTPS), production environment template, health checks, backup script (MongoDB dump + files, 14 kept) and a deployment guide.
+- **Continuous integration** (GitHub Actions): Ruff lint and format, test suite against a MongoDB service, Docker image build.
 - Test suite with a real in-memory MongoDB, S3 (moto), fake email sender and fake scanners.

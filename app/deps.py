@@ -12,6 +12,7 @@ from app.models.common import maybe_oid
 from app.services.accounts import can_manage_team, can_write
 from app.services.api_keys import API_KEY_PREFIX, api_key_admin
 from app.services.mailer import Mailer
+from app.services.mfa import allowed_during_setup, mfa_setup_required
 from app.services.notifications import PushService
 from app.services.scanning import ScanQueue
 from app.services.storage import Storage
@@ -64,7 +65,7 @@ def _access_payload(creds: HTTPAuthorizationCredentials | None, scope: str) -> d
     return payload
 
 
-async def current_admin(db: Db, creds: Credentials) -> dict:
+async def current_admin(db: Db, request: Request, creds: Credentials) -> dict:
     # Clé API d'un compte développeur (intégration continue) : droits d'un développeur de ce compte
     if creds and creds.credentials.startswith(API_KEY_PREFIX):
         return await api_key_admin(db, creds.credentials)
@@ -72,10 +73,13 @@ async def current_admin(db: Db, creds: Credentials) -> dict:
     admin = await db.admins.find_one({"_id": maybe_oid(payload["sub"])})
     if not admin or not admin.get("active", True):
         raise ApiError(401, "invalid_token")
+    account = await db.accounts.find_one({"_id": admin["account_id"]}) if admin.get("account_id") else None
     # Compte développeur suspendu : sessions en cours refusées (jamais l'administrateur de la plateforme)
-    if admin.get("role") != "admin" and admin.get("account_id"):
-        if await db.accounts.find_one({"_id": admin["account_id"], "suspended": True}, {"_id": 1}):
-            raise ApiError(401, "account_suspended")
+    if admin.get("role") != "admin" and (account or {}).get("suspended"):
+        raise ApiError(401, "account_suspended")
+    # Double authentification obligatoire mais pas encore configurée : seules la configuration et le profil sont accessibles
+    if mfa_setup_required(admin, account) and not allowed_during_setup(request.url.path):
+        raise ApiError(403, "mfa_setup_required")
     return admin
 
 

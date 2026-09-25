@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     jwt_secret: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
     admin_access_ttl_minutes: int = 30
+    # Double authentification (TOTP) : obligatoire pour l'administrateur de la plateforme
+    admin_require_2fa: bool = True
+    mfa_token_ttl_minutes: int = 5  # délai pour saisir le code après le mot de passe
     admin_refresh_ttl_days: int = 7
     user_access_ttl_minutes: int = 60
     user_refresh_ttl_days: int = 90
@@ -70,6 +73,12 @@ class Settings(BaseSettings):
     # Où télécharger l'app Kaskad (bouton des pages publiques quand l'app n'est pas installée) ; vide = bouton masqué
     kaskad_download_url: str | None = None
     android_package_id: str = "com.kaskad.store"
+
+    # --- Statistiques : pays des visiteurs (voir app/services/geo.py)
+    geoip_header: str | None = None  # ex. CF-IPCountry (Cloudflare), X-Country-Code (proxy)
+    geoip_database: str | None = None  # fichier GeoLite2-Country.mmdb ou dbip-country-lite.mmdb
+    # Un appareil qui n'a pas vérifié ses mises à jour depuis ce délai ne compte plus dans les installations
+    installations_active_days: int = 30
     invitation_ttl_days: int = 7
 
     # --- Stockage des binaires (jamais dans MongoDB)

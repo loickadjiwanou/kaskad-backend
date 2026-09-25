@@ -1,0 +1,29 @@
+# Certificats HTTPS obtenus et renouvelés automatiquement par Caddy (Let's Encrypt).
+{
+	email {$ACME_EMAIL}
+}
+
+# API, pages web publiques des apps (/a/<id>) et médias
+{$API_DOMAIN} {
+	encode zstd gzip
+	request_body {
+		# Envoi des installeurs par la console (ajuster à MAX_UPLOAD_SIZE)
+		max_size 2GB
+	}
+	reverse_proxy api:8000
+}
+
+# Console web
+{$CONSOLE_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy console:80
+}
+
+# Fichiers (liens de téléchargement signés vers MinIO). L'hôte d'origine est conservé :
+# il fait partie de la signature des liens (S3_PUBLIC_ENDPOINT_URL).
+{$FILES_DOMAIN} {
+	request_body {
+		max_size 2GB
+	}
+	reverse_proxy minio:9000
+}

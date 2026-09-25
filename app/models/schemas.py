@@ -54,6 +54,16 @@ class AdminOut(BaseModel):
     account: dict | None = None
     created_at: datetime | None = None
     last_login_at: datetime | None = None
+    mfa_enabled: bool = False
+    mfa_required: bool = False
+    mfa_setup_required: bool = False
+
+
+class MfaChallenge(BaseModel):
+    """Mot de passe correct, double authentification activée : le code est demandé (POST /admin/auth/login/2fa)."""
+
+    mfa_required: bool = True
+    mfa_token: str
 
 
 class AdminSession(BaseModel):
@@ -102,6 +112,13 @@ class InstalledCheck(BaseModel):
 
 class UpdatesCheckIn(BaseModel):
     installed: list[InstalledCheck] = Field(default_factory=list, max_length=500)
+    # Identifiant aléatoire de l'appareil (haché côté serveur) : statistiques des versions réellement installées
+    device_id: str | None = Field(default=None, min_length=8, max_length=128)
+
+
+class ViewIn(BaseModel):
+    platform: Platform | None = None
+    device_id: str | None = Field(default=None, min_length=8, max_length=128)
 
 
 # ---------- Catégories

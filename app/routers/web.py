@@ -12,6 +12,10 @@ from app.core.i18n import language
 from app.deps import Db
 from app.models.common import maybe_oid
 from app.services.catalog import PUBLIC_APP_FILTER, app_detail, category_out, share_url
+from app.services.geo import country_for
+from app.services.stats import record_view, visitor_hash
+
+BOT_WORDS = ("bot", "crawler", "spider", "preview", "facebookexternalhit", "slack", "whatsapp", "telegram", "discord", "curl", "wget")
 
 router = APIRouter(include_in_schema=False)
 
@@ -104,6 +108,11 @@ async def app_page(db: Db, request: Request, app_id: str):
         return response
 
     s = get_settings()
+    # Vue de la page publique (sauf robots et aperçus de liens)
+    agent = (request.headers.get("user-agent") or "").lower()
+    if agent and not any(w in agent for w in BOT_WORDS):
+        ip = request.client.host if request.client else ""
+        await record_view(db, app["_id"], visitor_hash(f"ip:{ip}:{agent}"), None, "web", country_for(request))
     categories = await db.categories.find({"_id": {"$in": app.get("category_ids", [])}}).sort("order", 1).to_list(None)
     d = app_detail(app, categories, [], lang)
     url = share_url(app["_id"])

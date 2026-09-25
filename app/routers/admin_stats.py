@@ -15,11 +15,13 @@ from app.routers.admin_apps import get_app_or_404
 from app.services.accounts import account_scope, is_platform_admin, scoped_app_ids
 from app.services.activity import activity_out
 from app.services.catalog import app_admin, version_admin
-from app.services.stats import downloads_by, downloads_timeseries, raw_downloads, top_apps
+from app.services.stats import breakdown as stats_breakdown
+from app.services.stats import funnel, installed_base, raw_downloads, timeseries, top_apps
 
 router = APIRouter(prefix="/admin", tags=["admin: stats & moderation"])
 
 Interval = Literal["day", "week", "month"]
+Metric = Literal["downloads", "views"]
 
 
 @router.get("/stats/overview")
@@ -36,6 +38,7 @@ async def overview(db: Db, admin: CurrentAdmin):
         await db.download_stats.estimated_document_count() if ids is None else await db.download_stats.count_documents(in_apps)
     )
     last_30 = await db.download_stats.count_documents({"timestamp": {"$gte": now() - timedelta(days=30)}, **in_apps})
+    views_30 = await db.app_views.count_documents({"timestamp": {"$gte": now() - timedelta(days=30)}, **in_apps})
     pending_review = await db.versions.count_documents(
         {"upload_status": "stored", "status": "draft", "security_scan_status": {"$in": ["pending", "scanning", "passed"]}, **in_apps}
     )
@@ -63,6 +66,9 @@ async def overview(db: Db, admin: CurrentAdmin):
         },
         "total_downloads": total_downloads,
         "downloads_last_30_days": last_30,
+        # Vues de fiche (app client + page web) et conversion vues → téléchargements sur 30 jours
+        "views_last_30_days": views_30,
+        "conversion_last_30_days": round(last_30 / views_30, 4) if views_30 else None,
         "versions_pending_review": pending_review,
         # Demandes des éditeurs en attente de validation par un admin complet
         "reviews_pending": reviews_pending,
@@ -94,27 +100,54 @@ async def downloads(
     app_id: str | None = None,
     version_id: str | None = None,
     account_id: str | None = None,  # administrateur de la plateforme : un compte développeur
+    metric: Metric = "downloads",
 ):
-    """Téléchargements dans le temps (global, par app ou par version)."""
+    """Téléchargements (ou vues de fiche, `metric=views`) dans le temps : global, par app ou par version."""
     if app_id:
         await get_app_or_404(db, app_id, admin)
     ids = await scoped_app_ids(db, admin, maybe_oid(account_id))
-    return await downloads_timeseries(db, start, end, interval, maybe_oid(app_id), maybe_oid(version_id), ids)
+    return await timeseries(db, start, end, interval, maybe_oid(app_id), maybe_oid(version_id), ids, metric)
 
 
 @router.get("/stats/breakdown")
 async def breakdown(
     db: Db,
     admin: CurrentAdmin,
-    by: Literal["platform", "file_format", "version_id", "app_id"] = "platform",
+    by: Literal["platform", "file_format", "version_id", "app_id", "country", "source"] = "platform",
     start: datetime | None = Query(default=None, alias="from"),
     end: datetime | None = Query(default=None, alias="to"),
     app_id: str | None = None,
     account_id: str | None = None,  # administrateur de la plateforme : un compte développeur
+    metric: Metric = "downloads",
 ):
+    """Répartition des téléchargements ou des vues (`source` : app client / page web, vues uniquement)."""
     if app_id:
         await get_app_or_404(db, app_id, admin)
-    return await downloads_by(db, by, start, end, maybe_oid(app_id), await scoped_app_ids(db, admin, maybe_oid(account_id)))
+    ids = await scoped_app_ids(db, admin, maybe_oid(account_id))
+    return await stats_breakdown(db, by, start, end, maybe_oid(app_id), ids, metric)
+
+
+@router.get("/stats/funnel")
+async def conversion(
+    db: Db,
+    admin: CurrentAdmin,
+    start: datetime | None = Query(default=None, alias="from"),
+    end: datetime | None = Query(default=None, alias="to"),
+    app_id: str | None = None,
+    account_id: str | None = None,
+):
+    """Vues de fiche, visiteurs uniques, téléchargements et taux de conversion sur la période."""
+    if app_id:
+        await get_app_or_404(db, app_id, admin)
+    return await funnel(db, start, end, maybe_oid(app_id), await scoped_app_ids(db, admin, maybe_oid(account_id)))
+
+
+@router.get("/stats/installed")
+async def installed(db: Db, admin: CurrentAdmin, app_id: str | None = None, account_id: str | None = None):
+    """Versions réellement installées : appareils actifs par version (une app) ou par app."""
+    if app_id:
+        await get_app_or_404(db, app_id, admin)
+    return await installed_base(db, maybe_oid(app_id), await scoped_app_ids(db, admin, maybe_oid(account_id)))
 
 
 @router.get("/stats/top-apps")
@@ -156,7 +189,7 @@ async def export_csv(
     async def rows():
         buf = io.StringIO()
         writer = csv.writer(buf)
-        writer.writerow(["timestamp", "account", "app_id", "app_name", "version_id", "version_name", "platform", "file_format"])
+        writer.writerow(["timestamp", "account", "app_id", "app_name", "version_id", "version_name", "platform", "file_format", "country"])
         yield buf.getvalue()
         async for r in raw_downloads(db, start, end, maybe_oid(app_id), ids):
             buf.seek(0)
@@ -171,6 +204,7 @@ async def export_csv(
                     versions.get(r["version_id"], ""),
                     r.get("platform", ""),
                     r.get("file_format", ""),
+                    r.get("country") or "",
                 ]
             )
             yield buf.getvalue()

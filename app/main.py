@@ -11,7 +11,7 @@ from app.core.config import get_settings
 from app.core.i18n import ApiError, language, message
 from app.core.ratelimit import LoginRateLimiter
 from app.db import close_client, ensure_indexes, get_db
-from app.routers import admin_apps, admin_auth, admin_categories, admin_stats, admin_versions, public, reviews, users, web
+from app.routers import admin_apps, admin_auth, admin_categories, admin_mfa, admin_stats, admin_versions, public, reviews, users, web
 from app.services import accounts
 from app.services.cleanup import cleanup_loop
 from app.services.mailer import Mailer
@@ -98,6 +98,7 @@ def create_app() -> FastAPI:
         public.router,
         users.router,
         admin_auth.router,
+        admin_mfa.router,
         admin_categories.router,
         admin_apps.router,
         admin_versions.router,

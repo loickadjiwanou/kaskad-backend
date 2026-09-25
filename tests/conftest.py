@@ -1,3 +1,4 @@
+import os
 import re
 import tempfile
 import uuid
@@ -14,7 +15,12 @@ ADMIN_PASSWORD = "admin-password"
 
 @pytest.fixture(scope="session")
 def mongo_uri():
-    """Vrai mongod (téléchargé une fois par pymongo_inmemory), partagé par toute la session de tests."""
+    """Vrai mongod (téléchargé une fois par pymongo_inmemory), partagé par toute la session de tests.
+
+    En intégration continue, `TEST_MONGODB_URI` désigne un MongoDB déjà lancé (service Docker)."""
+    if os.environ.get("TEST_MONGODB_URI"):
+        yield os.environ["TEST_MONGODB_URI"]
+        return
     mongod = Mongod(Context())
     mongod.start()
     try:
@@ -36,6 +42,8 @@ async def app(mongo_uri, monkeypatch):
         "ADMIN_EMAIL": ADMIN_EMAIL,
         "ADMIN_PASSWORD": ADMIN_PASSWORD,
         "PUBLIC_BASE_URL": "http://test",
+        # Double authentification de l'administrateur : testée à part (tests/test_mfa.py)
+        "ADMIN_REQUIRE_2FA": "false",
     }
     for k, v in env.items():
         monkeypatch.setenv(k, v)
@@ -50,7 +58,8 @@ async def app(mongo_uri, monkeypatch):
     from app.main import create_app
 
     application = create_app()
-    async with LifespanManager(application):
+    # Démarrage (index MongoDB) plus lent avec un MongoDB en conteneur (intégration continue)
+    async with LifespanManager(application, startup_timeout=60, shutdown_timeout=30):
         application.state.mailer = FakeMailer()  # e-mails capturés (jamais envoyés à Brevo)
         application.state.scan_queue.mailer = application.state.mailer
         yield application

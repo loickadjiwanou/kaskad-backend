@@ -154,7 +154,7 @@ async def test_stats_and_csv_export(app, client, admin_headers):
     series = (await client.get(f"{API}/admin/stats/downloads", headers=admin_headers)).json()
     assert sum(p["count"] for p in series) == 3
     top = (await client.get(f"{API}/admin/stats/top-apps", headers=admin_headers)).json()
-    assert top == [{"app_id": a["id"], "name": "Kaskad Notes", "downloads": 3}]
+    assert top == [{"app_id": a["id"], "name": "Kaskad Notes", "downloads": 3, "views": 0, "conversion": None}]
     by_platform = (await client.get(f"{API}/admin/stats/breakdown", params={"by": "platform"}, headers=admin_headers)).json()
     assert by_platform == [{"key": "linux", "count": 3}]
     csv = await client.get(f"{API}/admin/stats/export.csv", headers=admin_headers)

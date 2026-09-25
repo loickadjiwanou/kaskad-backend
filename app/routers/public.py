@@ -10,7 +10,7 @@ from pymongo.collation import Collation
 from app.core.i18n import ApiError, language
 from app.deps import Db, OptionalUser, StorageDep
 from app.models.common import Platform, maybe_oid, oid
-from app.models.schemas import UpdatesCheckIn
+from app.models.schemas import UpdatesCheckIn, ViewIn
 from app.services.catalog import (
     PUBLIC_APP_FILTER,
     PUBLIC_VERSION_FILTER,
@@ -22,7 +22,8 @@ from app.services.catalog import (
     verify_beta_token,
     version_public,
 )
-from app.services.stats import record_download
+from app.services.geo import country_for
+from app.services.stats import record_download, record_installations, record_view, visitor_hash
 from app.services.storage import LocalStorage
 
 router = APIRouter(tags=["public"])
@@ -171,7 +172,7 @@ async def download_version(
     if not app:
         raise ApiError(404, "version_unavailable")
     if not _is_resume(request.headers.get("range")):
-        await record_download(db, app["_id"], version, platform)
+        await record_download(db, app["_id"], version, platform, country_for(request))
     url = await storage.signed_url(version["storage_key"], version.get("file_name"))
     return RedirectResponse(url, status_code=302, headers={"Cache-Control": "no-store"})
 
@@ -179,6 +180,23 @@ async def download_version(
 def _is_resume(range_header: str | None) -> bool:
     match = re.match(r"^\s*bytes\s*=\s*(\d+)-", range_header or "")
     return bool(match and int(match.group(1)) > 0)
+
+
+@router.post("/apps/{app_id}/view", status_code=204)
+async def track_view(db: Db, request: Request, user: OptionalUser, app_id: str, body: ViewIn | None = None):
+    """Vue de la fiche dans l'app client (une par visiteur et par app toutes les 30 minutes)."""
+    app = await db.apps.find_one({"_id": oid(app_id, "app_not_found"), **PUBLIC_APP_FILTER}, {"_id": 1})
+    if not app:
+        raise ApiError(404, "app_not_found")
+    body = body or ViewIn()
+    who = (
+        f"user:{user['_id']}"
+        if user
+        else f"device:{body.device_id}"
+        if body.device_id
+        else f"ip:{request.client.host if request.client else ''}"
+    )
+    await record_view(db, app["_id"], visitor_hash(who), body.platform, "app", country_for(request))
 
 
 @router.post("/updates/check")
@@ -191,6 +209,18 @@ async def check_updates(db: Db, request: Request, user: OptionalUser, body: Upda
     candidates_all = await db.versions.find({"app_id": {"$in": list(apps)}, **PUBLIC_VERSION_FILTER}).sort("version_code", -1).to_list(None)
     # Bêta : proposée uniquement aux testeurs de l'app
     versions = [v for v in candidates_all if v.get("channel") != "beta" or is_tester(apps[v["app_id"]], user)]
+    # Versions réellement installées (statistiques), par appareil
+    if body.device_id:
+        await record_installations(
+            db,
+            visitor_hash(f"device:{body.device_id}"),
+            [
+                {"app_id": a, "version_id": maybe_oid(i.version_id), "version_code": i.version_code, "platform": i.platform}
+                for i in body.installed
+                if (a := maybe_oid(i.app_id)) in apps
+            ],
+            country_for(request),
+        )
     lang = language(request)
     results = []
     for item in body.installed:
