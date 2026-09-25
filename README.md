@@ -102,6 +102,23 @@ Edit `.env` (at least `ADMIN_EMAIL`, `ADMIN_PASSWORD`, and the MongoDB connectio
 
 On startup the API creates the MongoDB indexes and, **if no admin exists**, the first admin account from `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
 
+### Exposing the API on the local network
+
+To reach the API from other devices (phone, tablet, another computer on the same Wi-Fi), listen on every interface:
+
+```bash
+.venv/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Then, with your computer's local IP address (macOS: `ipconfig getifaddr en0`, e.g. `192.168.1.4`):
+
+- set `PUBLIC_BASE_URL=http://192.168.1.4:8000` in `.env` (used to build media, download and public page links);
+- add the console / Expo web origins to `CORS_ORIGINS` (e.g. `http://192.168.1.4:5173`) and set `CONSOLE_URL` accordingly;
+- point the clients to it: `VITE_API_URL` (console) and `EXPO_PUBLIC_API_URL` (client app);
+- check from the device: `http://192.168.1.4:8000/api/v1/health`.
+
+Reserve the IP address in your router (static DHCP lease) so it doesn't change. Android release builds block plain HTTP by default; Expo Go and development builds allow it.
+
 ### Demo data
 
 Development only (refused when `ENVIRONMENT=production`): 6 categories and 10 published apps with small generated files and screenshots, matching the mobile app's demo data.
