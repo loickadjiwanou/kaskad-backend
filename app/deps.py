@@ -9,6 +9,8 @@ from app.core.i18n import ApiError
 from app.core.ratelimit import LoginRateLimiter
 from app.core.security import decode_token
 from app.models.common import maybe_oid
+from app.services.accounts import can_manage_team, can_write
+from app.services.mailer import Mailer
 from app.services.notifications import PushService
 from app.services.scanning import ScanQueue
 from app.services.storage import Storage
@@ -36,11 +38,16 @@ def get_login_limiter(request: Request) -> LoginRateLimiter:
     return request.app.state.login_limiter
 
 
+def get_mailer(request: Request) -> Mailer:
+    return request.app.state.mailer
+
+
 LoginLimiter = Annotated[LoginRateLimiter, Depends(get_login_limiter)]
 Db = Annotated[AsyncDatabase, Depends(get_db)]
 StorageDep = Annotated[Storage, Depends(get_storage)]
 ScanQueueDep = Annotated[ScanQueue, Depends(get_scan_queue)]
 PushDep = Annotated[PushService, Depends(get_push)]
+MailerDep = Annotated[Mailer, Depends(get_mailer)]
 Credentials = Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]
 
 
@@ -68,13 +75,33 @@ CurrentAdmin = Annotated[dict, Depends(current_admin)]
 
 
 async def require_full_admin(admin: CurrentAdmin) -> dict:
-    """Rôle "admin" (gestion des comptes, suppression de catégories) ; "editor" = gestion du contenu."""
+    """Administrateur de la plateforme (unique) : comptes développeurs, catégories."""
     if admin.get("role") != "admin":
         raise ApiError(403, "forbidden")
     return admin
 
 
 FullAdmin = Annotated[dict, Depends(require_full_admin)]
+
+
+async def require_writer(admin: CurrentAdmin) -> dict:
+    """Modification du contenu : refusée aux lecteurs (rôle `viewer`, consultation seule)."""
+    if not can_write(admin):
+        raise ApiError(403, "read_only")
+    return admin
+
+
+Writer = Annotated[dict, Depends(require_writer)]
+
+
+async def require_team_manager(admin: CurrentAdmin) -> dict:
+    """Gestion des membres et invitations : propriétaire du compte (ou administrateur de la plateforme pour le sien)."""
+    if not can_manage_team(admin):
+        raise ApiError(403, "forbidden")
+    return admin
+
+
+TeamManager = Annotated[dict, Depends(require_team_manager)]
 
 
 async def require_publisher(admin: CurrentAdmin) -> dict:

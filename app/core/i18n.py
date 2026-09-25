@@ -59,6 +59,25 @@ MESSAGES: dict[str, dict[str, str]] = {
     "review_not_pending": {"fr": "Aucune demande en attente de validation.", "en": "There is no request awaiting review."},
     "no_listing_draft": {"fr": "Aucune modification de fiche en attente.", "en": "There are no pending listing changes."},
     "status_unchanged": {"fr": "L'application a déjà ce statut.", "en": "The app already has this status."},
+    "email_not_verified": {
+        "fr": "Confirmez d'abord votre adresse e-mail : ouvrez le lien reçu par e-mail.",
+        "en": "Please confirm your email address first: open the link we sent you.",
+    },
+    "token_invalid": {"fr": "Ce lien n'est plus valide. Demandez-en un nouveau.", "en": "This link is no longer valid. Request a new one."},
+    "invitation_invalid": {
+        "fr": "Cette invitation n'est plus valide (expirée, annulée ou déjà utilisée).",
+        "en": "This invitation is no longer valid (expired, revoked or already used).",
+    },
+    "already_member": {
+        "fr": "Cette adresse e-mail est déjà associée à un compte Kaskad Console.",
+        "en": "This email address already has a Kaskad Console account.",
+    },
+    "invalid_role": {"fr": "Rôle invalide.", "en": "Invalid role."},
+    "cannot_edit_member": {"fr": "Ce membre ne peut pas être modifié.", "en": "This member cannot be changed."},
+    "read_only": {
+        "fr": "Votre rôle (lecteur) permet uniquement la consultation.",
+        "en": "Your role (viewer) only allows viewing.",
+    },
     "invalid_image": {"fr": "Image invalide (PNG, JPEG ou WebP).", "en": "Invalid image (PNG, JPEG or WebP)."},
 }
 

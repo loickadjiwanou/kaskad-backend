@@ -66,28 +66,3 @@ async def test_library_sync_and_push_tokens(app, client, admin_headers):
     user = await app.state.db.users.find_one({"device_id": "device-lib-0001"})
     assert user["push_tokens"][0]["token"] == "fcm-token-123"
     assert (await client.get(f"{API}/me")).status_code == 401
-
-
-async def test_roles_and_last_admin_protection(client, admin_headers):
-    r = await client.post(
-        f"{API}/admin/admins",
-        json={"email": "editor@example.com", "password": "editor-pass", "name": "Ed", "role": "editor"},
-        headers=admin_headers,
-    )
-    editor = r.json()
-    ed_session = (await client.post(f"{API}/admin/auth/login", json={"email": "editor@example.com", "password": "editor-pass"})).json()
-    ed = {"Authorization": f"Bearer {ed_session['access_token']}"}
-    # L'éditeur gère le contenu mais pas les comptes
-    assert (await client.post(f"{API}/admin/categories", json={"name": "Jeux"}, headers=ed)).status_code == 201
-    assert (await client.get(f"{API}/admin/admins", headers=ed)).status_code == 403
-
-    admins = (await client.get(f"{API}/admin/admins", headers=admin_headers)).json()
-    me = next(x for x in admins if x["role"] == "admin")
-    r = await client.patch(f"{API}/admin/admins/{me['id']}", json={"role": "editor"}, headers=admin_headers)
-    assert r.status_code == 409 and r.json()["code"] == "last_admin"
-
-    # Compte désactivé : sessions révoquées, connexion refusée
-    await client.patch(f"{API}/admin/admins/{editor['id']}", json={"active": False}, headers=admin_headers)
-    assert (await client.get(f"{API}/admin/auth/me", headers=ed)).status_code == 401
-    r = await client.post(f"{API}/admin/auth/login", json={"email": "editor@example.com", "password": "editor-pass"})
-    assert r.status_code == 403

@@ -47,6 +47,21 @@ class Settings(BaseSettings):
     admin_email: str | None = None
     admin_password: str | None = None
 
+    # --- E-mails transactionnels (Brevo) : confirmation d'inscription, invitations
+    # Relais SMTP Brevo (onglet SMTP) ou clé API HTTP (xkeysib-…, prioritaire si renseignée).
+    # Sans l'un ni l'autre, les e-mails sont écrits dans les logs (développement).
+    brevo_smtp_host: str = "smtp-relay.brevo.com"
+    brevo_smtp_port: int = 587  # STARTTLS (465 : TLS direct)
+    brevo_smtp_login: str | None = None
+    brevo_smtp_key: str | None = None
+    brevo_api_key: str | None = None
+    mail_sender_email: str | None = None  # expéditeur validé dans Brevo
+    mail_sender_name: str = "Kaskad"
+    # URL de la console (liens des e-mails : confirmation, invitation)
+    console_url: str = "http://localhost:5173"
+    email_verification_ttl_hours: int = 48
+    invitation_ttl_days: int = 7
+
     # --- Stockage des binaires (jamais dans MongoDB)
     storage_backend: Literal["local", "s3"] = "local"
     local_storage_dir: str = "./storage"

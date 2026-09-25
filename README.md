@@ -58,7 +58,7 @@ The API serves three consumers:
 
 | Area | What the API provides |
 |---|---|
-| Authentication & roles | JWT for admins and end users, short-lived access tokens, single-use refresh tokens (rotation) with revocation, admin roles (full admin / content editor), login rate limiting |
+| Authentication & roles | JWT for admins and end users, short-lived access tokens, single-use refresh tokens (rotation) with revocation, developer accounts (sign-up with email confirmation, invitations, roles owner / developer / viewer), unique platform admin, login rate limiting |
 | Catalog | App CRUD (name, short/long description, icon, screenshots, categories, target platforms, featured flag), status draft / published / archived, preview as displayed in the client app |
 | Versions & files | Binary upload per version and format, semantic version + version code, changelog, size, SHA-256 computed on upload, complete history (archived, never deleted) |
 | Storage | S3-compatible (MinIO, Backblaze B2) or local disk, signed temporary download URLs (anti-hotlinking), resumable downloads (`Range`), automatic cleanup of incomplete uploads and orphan files |
@@ -170,7 +170,22 @@ All settings are environment variables, read from the process environment or fro
 | `ADMIN_ACCESS_TTL_MINUTES` / `ADMIN_REFRESH_TTL_DAYS` | 30 / 7 | Admin session lifetimes |
 | `USER_ACCESS_TTL_MINUTES` / `USER_REFRESH_TTL_DAYS` | 60 / 90 | End-user session lifetimes |
 | `LOGIN_MAX_ATTEMPTS` / `LOGIN_WINDOW_MINUTES` | 10 / 15 | Login attempts allowed per account and IP address |
-| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | — | First admin account, created only if there is none |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | — | The **platform admin** (unique), created at startup if missing |
+
+### Emails (Brevo)
+
+Sign-up confirmation and team invitations are sent with [Brevo](https://www.brevo.com) transactional emails, in the console's language at the time of sending.
+
+| Variable | Default | Description |
+|---|---|---|
+| `BREVO_SMTP_HOST` / `BREVO_SMTP_PORT` | `smtp-relay.brevo.com` / `587` | Brevo SMTP relay (STARTTLS; `465` for direct TLS) |
+| `BREVO_SMTP_LOGIN` / `BREVO_SMTP_KEY` | — | SMTP login and SMTP key (`xsmtpsib-…`), from *SMTP & API › SMTP* |
+| `BREVO_API_KEY` | — | Alternative: HTTP API key (`xkeysib-…`), used instead of SMTP when set |
+| `MAIL_SENDER_EMAIL` / `MAIL_SENDER_NAME` | — / `Kaskad` | Sender, validated in Brevo (*Senders, domains & dedicated IPs*). Prefer an address on your own authenticated domain (SPF/DKIM): a Gmail sender sent through Brevo often lands in spam |
+
+Without an SMTP key, an API key or a sender, emails are not sent but written to the API logs (development).
+| `CONSOLE_URL` | `http://localhost:5173` | Console address used in email links |
+| `EMAIL_VERIFICATION_TTL_HOURS` / `INVITATION_TTL_DAYS` | 48 / 7 | Link lifetimes |
 
 ### Storage
 
@@ -215,24 +230,28 @@ Two independent scopes, each with its own tokens: **admin** (console) and **user
 - **Passwords:** hashed with Argon2id.
 - **Rate limiting:** failed logins are limited per account and IP address (`429 too_many_attempts`, with `retry_after`). The limiter is in memory; use a shared store (e.g. Redis) if you run several API instances.
 
-**Admin roles**
+**Developer accounts and roles** (like Google Play Console)
+
+Anyone can sign up to the console (`POST /admin/auth/signup`): this creates a **developer account** owned by the new user, who must confirm their email address before signing in. The owner invites people by email (`POST /admin/invitations`) and gives them a role. Each account only sees its own apps, versions, statistics, moderation queue and activity log.
 
 | Role | Permissions |
 |---|---|
-| `admin` | Everything: approves and publishes, manages admin accounts. The first admin is created at startup from `ADMIN_EMAIL` / `ADMIN_PASSWORD` |
-| `editor` | Prepares content (apps, listings, versions, categories) and **submits it for review**; cannot publish |
+| `admin` | **Platform admin**, unique (`ADMIN_EMAIL`), never assignable. Sees every account, approves and publishes, manages categories. Also owns the platform's own account ("Kaskad") |
+| `owner` | Creates the developer account at sign-up. Manages apps and **the team** (invitations, roles, access) |
+| `developer` | Creates and edits apps, uploads versions, **submits them for review** |
+| `viewer` | Read-only: apps, versions, statistics, activity log |
 
-The last active `admin` cannot be demoted or disabled.
+Invitations can only grant `developer` or `viewer`. A person belongs to one account. On startup, older data is migrated: existing apps belong to the platform account and former `editor` accounts become its developers.
 
-**Review workflow** (like Google Play Console): nothing goes live without a full admin.
+**Review workflow**: nothing goes live without the platform admin.
 
-| What | Editor | Full admin |
+| What | Owner / developer | Platform admin |
 |---|---|---|
 | Version | `POST /admin/versions/{id}/submit` once the scan has passed | `publish` (approves the submission) or `reject` with a reason |
 | App status (publish / unpublish / draft) | `POST /admin/apps/{id}/status-request` | `status-request/approve` / `reject`, or `POST /admin/apps/{id}/status` directly |
 | Listing of a live app (texts, icon, screenshots, categories…) | Edits are saved in a **listing draft** (`draft` in the app response), invisible in the catalog; `listing/submit` | `listing/publish` (applies the draft) or `listing/reject` |
 
-Editing a submitted item cancels its submission (it must be submitted again). Editors can withdraw their own requests. Only a full admin can edit or archive a published version. Apps that are not live (draft / unpublished) are edited directly. Every step is recorded in the activity log.
+Editing a submitted item cancels its submission (it must be submitted again). Members can withdraw their own requests. Only the platform admin can edit or archive a published version. Apps that are not live (draft / unpublished) are edited directly. Every step is recorded in the activity log.
 
 **End-user accounts** are optional: the client app works without one.
 
@@ -354,16 +373,25 @@ Auth responses: `{access_token, refresh_token, token_type, user: {id, email, ano
 
 ### Admin (console)
 
-All routes require an admin access token. Routes marked **admin** require the `admin` role.
+Routes require a console access token, except sign-up, email confirmation and invitation acceptance. Routes marked **admin** are reserved to the platform admin, **owner** to account owners (and the platform admin for its own account). Viewers get `403 read_only` on every change.
 
 | Method | Path | Description |
 |---|---|---|
 | POST | `/admin/auth/login` · `/refresh` · `/logout` | Session (`{access_token, refresh_token, admin}`) |
-| GET / PATCH | `/admin/auth/me` | Own profile (name, password change with current password) |
-| GET / POST | `/admin/admins` | **admin** — list / create admin accounts |
-| PATCH | `/admin/admins/{id}` | **admin** — name, role, active, password (sessions revoked when disabled or password changed) |
-| GET / POST | `/admin/categories` | List (with `apps_count`) / create |
-| PATCH / DELETE | `/admin/categories/{id}` | Update / delete (`?reassign_to=` required if the category has apps) |
+| POST | `/admin/auth/signup` | Public — `{name, email, password, account_name}`: creates a developer account and sends the confirmation email |
+| POST | `/admin/auth/verify-email` | Public — `{token}` from the email: confirms the address and returns a session |
+| POST | `/admin/auth/resend-verification` | Public — `{email}` (same answer whether the address exists or not) |
+| GET / PATCH | `/admin/auth/me` | Own profile with `account` (name, password change with current password) |
+| PATCH | `/admin/account` | **owner** — rename the developer account |
+| GET | `/admin/accounts` | **admin** — every developer account (owner, members, apps) |
+| GET | `/admin/members` | Members of the account (`?account_id=` for the platform admin) |
+| PATCH | `/admin/members/{id}` | **owner** — `{role: developer\|viewer, active}` (sessions revoked when disabled) |
+| GET / POST | `/admin/invitations` | **owner** — pending invitations / invite `{email, role}` (email in the `Accept-Language` language) |
+| POST / DELETE | `/admin/invitations/{id}/resend` · `/admin/invitations/{id}` | **owner** — resend (new link) / revoke |
+| GET | `/admin/invitations/lookup?token=` | Public — invitation details for the acceptance page |
+| POST | `/admin/invitations/accept` | Public — `{token, name, password}`: joins the account and returns a session |
+| GET / POST | `/admin/categories` | List (with `apps_count`) / **admin** create |
+| PATCH / DELETE | `/admin/categories/{id}` | **admin** update / delete (`?reassign_to=` required if the category has apps) |
 | PUT | `/admin/categories/order` | `{ids: [...]}` → new display order |
 | POST | `/admin/categories/{id}/reassign` | `{to_category_id, app_ids?}` → move apps |
 | GET / POST | `/admin/apps` | List (`status`, `q`, `category_id`, pagination, `pending_versions`) / create |
@@ -389,8 +417,8 @@ All routes require an admin access token. Routes marked **admin** require the `a
 | GET | `/admin/stats/breakdown` | Downloads by `platform`, `file_format`, `version_id` or `app_id` |
 | GET | `/admin/stats/top-apps` | Most downloaded apps over a period |
 | GET | `/admin/stats/export.csv` | CSV export (one line per download) |
-| GET | `/admin/moderation/queue` | Versions not published yet (scanning, rejected or awaiting publication) |
-| GET | `/admin/moderation/reviews` | Review requests (pending or rejected): versions, status requests, listing drafts |
+| GET | `/admin/moderation/queue` | **admin** — Versions not published yet (scanning, rejected or awaiting publication) |
+| GET | `/admin/moderation/reviews` | **admin** — Review requests (pending or rejected): versions, status requests, listing drafts |
 | GET | `/admin/activity` | Activity log (`action` prefix, `actor_id`, pagination) |
 
 ---
@@ -412,14 +440,17 @@ Main codes: `not_authenticated`, `invalid_token`, `forbidden`, `invalid_credenti
 
 | Collection | Main fields |
 |---|---|
-| `apps` | `name`, `short_description`, `long_description`, `icon_key`, `screenshot_keys`, `category_ids`, `target_platforms`, `featured`, `status`, `android_package`, `listing_draft`, `listing_review`, `status_request`, `available_platforms`, `latest_version_name`, `last_published_at`, `downloads_count`, `created_at`, `updated_at` |
+| `accounts` | `name`, `owner_id` (developer accounts) |
+| `apps` | `account_id`, `name`, `short_description`, `long_description`, `icon_key`, `screenshot_keys`, `category_ids`, `target_platforms`, `featured`, `status`, `android_package`, `listing_draft`, `listing_review`, `status_request`, `available_platforms`, `latest_version_name`, `last_published_at`, `downloads_count`, `created_at`, `updated_at` |
 | `versions` | `app_id`, `version_name`, `version_code`, `platform`, `file_format`, `storage_key`, `file_name`, `file_size`, `sha256_hash`, `changelog`, `status`, `upload_status`, `security_scan_status`, `scan_report`, `apk_info`, `review`, `downloads_count`, `published_at`, `created_by`, `created_at` |
 | `categories` | `name`, `icon`, `order` |
 | `users` | `email`, `password_hash`, `anonymous`, `device_id`, `favorites`, `followed_apps [{app_id, notify}]`, `installed_apps [{app_id, version_id}]`, `push_tokens [{token, provider, platform, language}]` |
-| `admins` | `email`, `password_hash`, `name`, `role`, `active`, `last_login_at` |
+| `admins` | `email`, `password_hash`, `name`, `role` (`admin`, `owner`, `developer`, `viewer`), `account_id`, `active`, `email_verified`, `language`, `last_login_at` |
+| `invitations` | `account_id`, `email`, `role`, `token_hash`, `invited_by_name`, `language`, `expires_at`, `accepted_at` |
+| `email_tokens` | `admin_id`, `kind`, `token_hash`, `expires_at` (TTL index) |
 | `download_stats` | `app_id`, `version_id`, `timestamp`, `platform`, `file_format` |
 | `refresh_tokens` | `jti`, `subject_id`, `scope`, `expires_at` (TTL index) |
-| `activity_log` | `actor_id`, `actor_email`, `action`, `target_type`, `target_id`, `details`, `created_at` |
+| `activity_log` | `account_id`, `actor_id`, `actor_email`, `action`, `target_type`, `target_id`, `details`, `created_at` |
 
 `available_platforms`, `latest_version_name` and `last_published_at` are recomputed from published versions. File URLs are not stored: they are built from storage keys.
 
@@ -458,6 +489,7 @@ The suite starts a **real `mongod`** (downloaded once into `.mongo-bin/`, no Doc
 - full catalog flow: upload → scan → publish → public catalog → download (with `Range`) → statistics;
 - authentication: refresh rotation, roles, rate limiting;
 - review workflow: submissions, approvals, rejections, listing drafts;
+- developer accounts: sign-up and email confirmation, invitations and roles, isolation between accounts (emails captured by a fake mailer);
 - security: fake clamd detecting EICAR, format checks, APK certificate continuity, required antivirus;
 - S3 storage against a local S3 server (moto);
 - push notifications with a fake sender;

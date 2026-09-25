@@ -1,3 +1,4 @@
+import re
 import tempfile
 import uuid
 
@@ -50,8 +51,23 @@ async def app(mongo_uri, monkeypatch):
 
     application = create_app()
     async with LifespanManager(application):
+        application.state.mailer = FakeMailer()  # e-mails capturés (jamais envoyés à Brevo)
         yield application
     get_settings.cache_clear()
+
+
+class FakeMailer:
+    configured = True
+
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, email) -> None:
+        self.sent.append(email)
+
+    def last_link(self, to: str) -> str:
+        email = next(e for e in reversed(self.sent) if e.to_email == to)
+        return re.search(r"https?://\S+", email.text).group(0)
 
 
 @pytest.fixture

@@ -10,34 +10,16 @@ from fastapi.responses import JSONResponse
 from app.core.config import get_settings
 from app.core.i18n import ApiError, language, message
 from app.core.ratelimit import LoginRateLimiter
-from app.core.security import hash_password
 from app.db import close_client, ensure_indexes, get_db
-from app.models.common import now
 from app.routers import admin_apps, admin_auth, admin_categories, admin_stats, admin_versions, public, users
+from app.services import accounts
 from app.services.cleanup import cleanup_loop
+from app.services.mailer import Mailer
 from app.services.notifications import PushService
 from app.services.scanning import ScanQueue
 from app.services.storage import create_storage
 
 log = logging.getLogger("kaskad")
-
-
-async def bootstrap_admin(db) -> None:
-    """Crée le premier compte admin (ADMIN_EMAIL / ADMIN_PASSWORD) si aucun n'existe."""
-    s = get_settings()
-    if await db.admins.estimated_document_count() or not (s.admin_email and s.admin_password):
-        return
-    await db.admins.insert_one(
-        {
-            "email": s.admin_email.lower(),
-            "password_hash": hash_password(s.admin_password),
-            "name": "Administrator",
-            "role": "admin",
-            "active": True,
-            "created_at": now(),
-        }
-    )
-    log.info("Initial admin account created: %s", s.admin_email)
 
 
 @asynccontextmanager
@@ -47,14 +29,17 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("JWT_SECRET must be set to a random value of at least 32 characters in production")
     db = get_db()
     await ensure_indexes(db)
-    await bootstrap_admin(db)
+    await accounts.bootstrap(db)
     storage = create_storage(settings)
     await storage.init()
 
     app.state.db = db
     app.state.storage = storage
     app.state.push = PushService(settings)
+    app.state.mailer = Mailer(settings)
     app.state.login_limiter = LoginRateLimiter(settings.login_max_attempts, settings.login_window_minutes * 60)
+    # Inscriptions, renvois d'e-mail, invitations : limités par adresse IP
+    app.state.signup_limiter = LoginRateLimiter(5, 60 * 60, max_per_ip=20)
     app.state.scan_queue = ScanQueue(db, storage, settings)
     await app.state.scan_queue.start()
     cleanup_task = asyncio.create_task(cleanup_loop(db, storage, settings)) if settings.environment != "test" else None

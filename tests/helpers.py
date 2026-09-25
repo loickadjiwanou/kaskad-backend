@@ -44,3 +44,34 @@ async def published_app_with_version(client, app, headers, fmt="deb", platform="
     r = await client.post(f"{API}/admin/apps/{a['id']}/status", json={"status": "published"}, headers=headers)
     assert r.status_code == 200
     return cat, a, r.json(), v
+
+
+def token_from(app, email: str) -> str:
+    """Jeton du dernier lien envoyé à cette adresse (confirmation ou invitation)."""
+    link = app.state.mailer.last_link(email)
+    return link.rsplit("token=", 1)[-1] if "token=" in link else link.rsplit("/", 1)[-1]
+
+
+def bearer(session: dict) -> dict:
+    return {"Authorization": f"Bearer {session['access_token']}"}
+
+
+async def signup(client, app, email="owner@example.com", account="Studio Nova", name="Nora", lang="fr"):
+    """Inscription + confirmation de l'e-mail → en-têtes du propriétaire du nouveau compte."""
+    body = {"name": name, "email": email, "password": "owner-pass-1", "account_name": account}
+    r = await client.post(f"{API}/admin/auth/signup", json=body, headers={"Accept-Language": lang})
+    assert r.status_code == 201, r.text
+    r = await client.post(f"{API}/admin/auth/verify-email", json={"token": token_from(app, email)})
+    assert r.status_code == 200, r.text
+    return bearer(r.json())
+
+
+async def invite(client, app, headers, email, role="developer", name="Dev"):
+    """Invitation + acceptation → en-têtes du nouveau membre."""
+    r = await client.post(f"{API}/admin/invitations", json={"email": email, "role": role}, headers=headers)
+    assert r.status_code == 201, r.text
+    r = await client.post(
+        f"{API}/admin/invitations/accept", json={"token": token_from(app, email), "name": name, "password": "member-pass-1"}
+    )
+    assert r.status_code == 200, r.text
+    return bearer(r.json())

@@ -12,7 +12,7 @@ from pymongo.errors import DuplicateKeyError
 
 from app.core.config import get_settings
 from app.core.i18n import ApiError
-from app.deps import CurrentAdmin, Db, Publisher, PushDep, ScanQueueDep, StorageDep
+from app.deps import CurrentAdmin, Db, Publisher, PushDep, ScanQueueDep, StorageDep, Writer
 from app.models.common import CONTENT_TYPES, EXTENSIONS, FORMATS_BY_PLATFORM, SEMVER_PATTERN, FileFormat, Platform, now, oid
 from app.models.schemas import ReviewReject, ReviewSubmit, VersionUpdate
 from app.routers.admin_apps import get_app_or_404
@@ -31,16 +31,21 @@ def _file_name(app_name: str, version_name: str, platform: str, fmt: str) -> str
     return f"{base}.{ext}"
 
 
-async def _get_version(db, version_id: str) -> dict:
+async def _get_version(db, version_id: str, admin: dict) -> dict:
+    """Version d'une app visible par ce membre (voir get_app_or_404)."""
     v = await db.versions.find_one({"_id": oid(version_id, "version_not_found")})
     if not v:
         raise ApiError(404, "version_not_found")
+    try:
+        await get_app_or_404(db, str(v["app_id"]), admin)
+    except ApiError:
+        raise ApiError(404, "version_not_found") from None
     return v
 
 
 @router.get("/apps/{app_id}/versions")
-async def list_versions(db: Db, _: CurrentAdmin, app_id: str, include_abandoned: bool = False):
-    app = await get_app_or_404(db, app_id)
+async def list_versions(db: Db, admin: CurrentAdmin, app_id: str, include_abandoned: bool = False):
+    app = await get_app_or_404(db, app_id, admin)
     flt: dict = {"app_id": app["_id"]}
     if not include_abandoned:
         flt["upload_status"] = "stored"
@@ -53,7 +58,7 @@ async def upload_version(
     db: Db,
     storage: StorageDep,
     queue: ScanQueueDep,
-    admin: CurrentAdmin,
+    admin: Writer,
     app_id: str,
     file: UploadFile = File(...),
     version_name: str = Form(..., min_length=1, max_length=50),
@@ -64,7 +69,7 @@ async def upload_version(
 ):
     """Upload d'un binaire : le SHA-256 est calculé à la volée, puis l'analyse de sécurité est lancée."""
     settings = get_settings()
-    app = await get_app_or_404(db, app_id)
+    app = await get_app_or_404(db, app_id, admin)
     if not re.match(SEMVER_PATTERN, version_name):
         raise ApiError(422, "invalid_version_name")
     if file_format not in FORMATS_BY_PLATFORM[platform]:
@@ -137,13 +142,13 @@ async def upload_version(
 
 
 @router.get("/versions/{version_id}")
-async def get_version(db: Db, _: CurrentAdmin, version_id: str):
-    return version_admin(await _get_version(db, version_id))
+async def get_version(db: Db, admin: CurrentAdmin, version_id: str):
+    return version_admin(await _get_version(db, version_id, admin))
 
 
 @router.patch("/versions/{version_id}")
-async def update_version(db: Db, admin: CurrentAdmin, version_id: str, body: VersionUpdate):
-    v = await _get_version(db, version_id)
+async def update_version(db: Db, admin: Writer, version_id: str, body: VersionUpdate):
+    v = await _get_version(db, version_id, admin)
     # Une version en ligne ne peut être modifiée que par un admin complet
     if v.get("status") == "published" and not is_full_admin(admin):
         raise ApiError(403, "publish_requires_admin")
@@ -165,9 +170,9 @@ def _submittable(v: dict) -> bool:
 
 
 @router.post("/versions/{version_id}/submit")
-async def submit_version(db: Db, admin: CurrentAdmin, version_id: str, body: ReviewSubmit):
+async def submit_version(db: Db, admin: Writer, version_id: str, body: ReviewSubmit):
     """Soumet une version validée par l'analyse de sécurité à la validation d'un admin complet."""
-    v = await _get_version(db, version_id)
+    v = await _get_version(db, version_id, admin)
     if not _submittable(v):
         raise ApiError(409, "not_submittable")
     if is_pending(v.get("review")):
@@ -181,7 +186,7 @@ async def submit_version(db: Db, admin: CurrentAdmin, version_id: str, body: Rev
 @router.post("/versions/{version_id}/reject")
 async def reject_version(db: Db, admin: Publisher, version_id: str, body: ReviewReject):
     """Refus motivé d'une version soumise : son auteur voit le motif et peut la corriger puis la soumettre à nouveau."""
-    v = await _get_version(db, version_id)
+    v = await _get_version(db, version_id, admin)
     if not is_pending(v.get("review")):
         raise ApiError(409, "review_not_pending")
     await db.versions.update_one(
@@ -195,9 +200,9 @@ async def reject_version(db: Db, admin: Publisher, version_id: str, body: Review
 
 
 @router.delete("/versions/{version_id}/submission")
-async def withdraw_version(db: Db, admin: CurrentAdmin, version_id: str):
+async def withdraw_version(db: Db, admin: Writer, version_id: str):
     """Retire la soumission (ou efface un refus). Réservé à son auteur ou à un admin complet."""
-    v = await _get_version(db, version_id)
+    v = await _get_version(db, version_id, admin)
     review = v.get("review")
     if not review or v.get("status") != "draft":
         raise ApiError(409, "review_not_pending")
@@ -215,7 +220,7 @@ async def publish_version(db: Db, admin: Publisher, push: PushDep, background: B
 
     Valide la demande de l'éditeur si la version avait été soumise. Notifie les abonnés de l'app.
     """
-    v = await _get_version(db, version_id)
+    v = await _get_version(db, version_id, admin)
     if v.get("upload_status") != "stored" or v.get("security_scan_status") != "passed":
         raise ApiError(409, "scan_not_passed")
     if v.get("status") != "published":
@@ -241,12 +246,12 @@ async def publish_version(db: Db, admin: Publisher, push: PushDep, background: B
 
 
 @router.post("/versions/{version_id}/archive")
-async def archive_version(db: Db, admin: CurrentAdmin, version_id: str):
+async def archive_version(db: Db, admin: Writer, version_id: str):
     """Retire une version du catalogue (le fichier et l'historique sont conservés).
 
     Retirer une version en ligne est réservé aux admins complets ; un éditeur peut archiver une version non publiée.
     """
-    v = await _get_version(db, version_id)
+    v = await _get_version(db, version_id, admin)
     if v.get("status") == "published" and not is_full_admin(admin):
         raise ApiError(403, "publish_requires_admin")
     await db.versions.update_one({"_id": v["_id"]}, {"$set": {"status": "archived", "review": None, "updated_at": now()}})
@@ -256,8 +261,8 @@ async def archive_version(db: Db, admin: CurrentAdmin, version_id: str):
 
 
 @router.post("/versions/{version_id}/rescan")
-async def rescan_version(db: Db, queue: ScanQueueDep, admin: CurrentAdmin, version_id: str):
-    v = await _get_version(db, version_id)
+async def rescan_version(db: Db, queue: ScanQueueDep, admin: Writer, version_id: str):
+    v = await _get_version(db, version_id, admin)
     if v.get("upload_status") != "stored":
         raise ApiError(409, "version_unavailable")
     await db.versions.update_one({"_id": v["_id"]}, {"$set": {"security_scan_status": "pending", "review": None, "updated_at": now()}})
@@ -267,9 +272,9 @@ async def rescan_version(db: Db, queue: ScanQueueDep, admin: CurrentAdmin, versi
 
 
 @router.get("/versions/{version_id}/download-url")
-async def admin_download_url(db: Db, storage: StorageDep, _: CurrentAdmin, version_id: str):
+async def admin_download_url(db: Db, storage: StorageDep, admin: CurrentAdmin, version_id: str):
     """Lien de téléchargement pour la console (quel que soit le statut) — non comptabilisé dans les statistiques."""
-    v = await _get_version(db, version_id)
+    v = await _get_version(db, version_id, admin)
     if v.get("upload_status") != "stored":
         raise ApiError(409, "version_unavailable")
     return {"url": await storage.signed_url(v["storage_key"], v.get("file_name"))}

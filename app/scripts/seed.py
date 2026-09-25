@@ -19,6 +19,7 @@ from app.core.config import get_settings
 from app.db import close_client, ensure_indexes, get_db
 from app.models.common import CONTENT_TYPES, FORMATS_BY_PLATFORM, now
 from app.routers.admin_versions import _file_name
+from app.services import accounts
 from app.services.catalog import refresh_app_catalog_fields
 from app.services.storage import create_storage
 
@@ -236,6 +237,8 @@ async def seed(reset: bool) -> None:
                     await storage.save(key, io.BytesIO(data), CONTENT_TYPES[fmt])
                     await db.versions.update_one({"_id": doc["_id"]}, {"$set": {"storage_key": key}})
         await refresh_app_catalog_fields(db, app_id)
+    # Les apps de démo appartiennent au compte de la plateforme (administrateur ADMIN_EMAIL)
+    await accounts.bootstrap(db)
     print(f"Seeded {len(CATEGORIES)} categories and {len(APPS)} apps.")
 
 

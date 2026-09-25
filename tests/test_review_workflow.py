@@ -1,21 +1,17 @@
 """Circuit de validation : les éditeurs soumettent, seuls les admins complets publient."""
 
-from tests.helpers import API, create_app, published_app_with_version, upload, wait_scans
+from tests.helpers import API, create_app, invite, published_app_with_version, upload, wait_scans
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
 
 
-async def editor_headers(client, admin_headers, email="editor@example.com"):
-    r = await client.post(
-        f"{API}/admin/admins", json={"email": email, "password": "editor-pass", "name": "Ed", "role": "editor"}, headers=admin_headers
-    )
-    assert r.status_code == 201, r.text
-    session = (await client.post(f"{API}/admin/auth/login", json={"email": email, "password": "editor-pass"})).json()
-    return {"Authorization": f"Bearer {session['access_token']}"}
+async def editor_headers(client, app, admin_headers, email="editor@example.com"):
+    """Développeur invité dans le compte de la plateforme (il soumet, l'administrateur publie)."""
+    return await invite(client, app, admin_headers, email, "developer", "Ed")
 
 
 async def test_version_submission_approval_and_rejection(app, client, admin_headers):
-    ed = await editor_headers(client, admin_headers)
+    ed = await editor_headers(client, app, admin_headers)
     a = await create_app(client, ed)
     v = (await upload(client, ed, a["id"])).json()
     await wait_scans(app)
@@ -56,7 +52,7 @@ async def test_version_submission_approval_and_rejection(app, client, admin_head
 
 
 async def test_submission_requires_passed_scan_and_can_be_withdrawn(app, client, admin_headers):
-    ed = await editor_headers(client, admin_headers)
+    ed = await editor_headers(client, app, admin_headers)
     a = await create_app(client, ed)
     bad = (await upload(client, ed, a["id"], code=1, content=b"not a deb" * 50)).json()
     good = (await upload(client, ed, a["id"], code=2, name="1.0.1")).json()
@@ -64,14 +60,14 @@ async def test_submission_requires_passed_scan_and_can_be_withdrawn(app, client,
     assert (await client.post(f"{API}/admin/versions/{bad['id']}/submit", json={}, headers=ed)).json()["code"] == "not_submittable"
 
     await client.post(f"{API}/admin/versions/{good['id']}/submit", json={}, headers=ed)
-    other = await editor_headers(client, admin_headers, "other@example.com")
+    other = await editor_headers(client, app, admin_headers, "other@example.com")
     assert (await client.delete(f"{API}/admin/versions/{good['id']}/submission", headers=other)).status_code == 403
     r = await client.delete(f"{API}/admin/versions/{good['id']}/submission", headers=ed)
     assert r.status_code == 200 and r.json()["review"] is None
 
 
 async def test_app_status_requests(app, client, admin_headers):
-    ed = await editor_headers(client, admin_headers)
+    ed = await editor_headers(client, app, admin_headers)
     a = await create_app(client, ed)
     r = await client.post(f"{API}/admin/apps/{a['id']}/status", json={"status": "published"}, headers=ed)
     assert r.status_code == 403
@@ -95,7 +91,7 @@ async def test_app_status_requests(app, client, admin_headers):
 
 async def test_listing_changes_on_published_app_go_through_review(app, client, admin_headers):
     _, a, _, _ = await published_app_with_version(client, app, admin_headers)
-    ed = await editor_headers(client, admin_headers)
+    ed = await editor_headers(client, app, admin_headers)
 
     # Modification par l'éditeur : brouillon de fiche, catalogue public inchangé
     r = await client.patch(f"{API}/admin/apps/{a['id']}", json={"name": "Kaskad Notes Pro", "short_description": "Nouveau"}, headers=ed)
@@ -133,7 +129,7 @@ async def test_listing_changes_on_published_app_go_through_review(app, client, a
 
 
 async def test_draft_apps_are_edited_directly(app, client, admin_headers):
-    ed = await editor_headers(client, admin_headers)
+    ed = await editor_headers(client, app, admin_headers)
     a = await create_app(client, ed)
     r = await client.patch(f"{API}/admin/apps/{a['id']}", json={"name": "Direct"}, headers=ed)
     assert r.json()["name"] == "Direct" and r.json()["draft"] is None

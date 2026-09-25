@@ -159,7 +159,7 @@ async def test_stats_and_csv_export(app, client, admin_headers):
     assert by_platform == [{"key": "linux", "count": 3}]
     csv = await client.get(f"{API}/admin/stats/export.csv", headers=admin_headers)
     lines = csv.text.strip().splitlines()
-    assert lines[0].startswith("timestamp,app_id,app_name") and len(lines) == 4
+    assert lines[0].startswith("timestamp,account,app_id,app_name") and len(lines) == 4
 
 
 async def test_moderation_queue_and_activity_log(app, client, admin_headers):

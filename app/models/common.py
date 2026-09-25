@@ -11,7 +11,7 @@ FileFormat = Literal["apk", "exe", "msi", "dmg", "pkg", "appimage", "deb", "rpm"
 AppStatus = Literal["draft", "published", "archived"]
 VersionStatus = Literal["draft", "published", "archived"]
 ScanStatus = Literal["pending", "scanning", "passed", "failed"]
-AdminRole = Literal["admin", "editor"]
+AdminRole = Literal["admin", "owner", "developer", "viewer"]
 
 # Formats installables autorisés par plateforme
 FORMATS_BY_PLATFORM: dict[str, tuple[str, ...]] = {

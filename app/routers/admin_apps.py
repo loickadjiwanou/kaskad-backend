@@ -9,9 +9,10 @@ from fastapi import APIRouter, File, Query, UploadFile
 
 from app.core.config import get_settings
 from app.core.i18n import ApiError
-from app.deps import CurrentAdmin, Db, Publisher, StorageDep
+from app.deps import CurrentAdmin, Db, Publisher, StorageDep, Writer
 from app.models.common import AppStatus, maybe_oid, now, oid
 from app.models.schemas import AppIn, AppStatusIn, AppUpdate, ReviewReject, ReviewSubmit, ScreenshotsOrder, StatusRequestIn
+from app.services.accounts import account_scope, is_platform_admin
 from app.services.activity import log_activity
 from app.services.catalog import PUBLIC_VERSION_FILTER, app_admin, app_detail
 from app.services.review import (
@@ -34,8 +35,9 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_SCREENSHOTS = 12
 
 
-async def get_app_or_404(db, app_id: str) -> dict:
-    app = await db.apps.find_one({"_id": oid(app_id, "app_not_found")})
+async def get_app_or_404(db, app_id: str, admin: dict | None = None) -> dict:
+    """App visible par ce membre (son compte), ou n'importe quelle app pour l'administrateur de la plateforme."""
+    app = await db.apps.find_one({"_id": oid(app_id, "app_not_found"), **(account_scope(admin) if admin else {})})
     if not app:
         raise ApiError(404, "app_not_found")
     return app
@@ -52,14 +54,15 @@ async def _category_ids(db, ids: list[str]) -> list:
 @router.get("")
 async def list_apps(
     db: Db,
-    _: CurrentAdmin,
+    admin: CurrentAdmin,
     status: AppStatus | None = None,
     q: str | None = None,
     category_id: str | None = None,
+    account_id: str | None = None,  # administrateur de la plateforme : apps d'un compte développeur
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=50, ge=1, le=200),
 ):
-    flt: dict = {}
+    flt: dict = account_scope(admin, maybe_oid(account_id))
     if status:
         flt["status"] = status
     if category_id:
@@ -79,8 +82,15 @@ async def list_apps(
             )
         ).to_list(None)
     }
+    # Administrateur de la plateforme : nom du compte développeur de chaque app
+    accounts = {}
+    if is_platform_admin(admin):
+        ids = list({a.get("account_id") for a in items})
+        accounts = {c["_id"]: c["name"] for c in await db.accounts.find({"_id": {"$in": ids}}, {"name": 1}).to_list(None)}
     return {
-        "items": [{**app_admin(a), "pending_versions": pending.get(a["_id"], 0)} for a in items],
+        "items": [
+            {**app_admin(a), "pending_versions": pending.get(a["_id"], 0), "account_name": accounts.get(a.get("account_id"))} for a in items
+        ],
         "total": await db.apps.count_documents(flt),
         "page": page,
         "limit": limit,
@@ -88,10 +98,11 @@ async def list_apps(
 
 
 @router.post("", status_code=201)
-async def create_app(db: Db, admin: CurrentAdmin, body: AppIn):
+async def create_app(db: Db, admin: Writer, body: AppIn):
     doc = {
         **body.model_dump(exclude={"category_ids"}),
         "category_ids": await _category_ids(db, body.category_ids),
+        "account_id": admin["account_id"],
         "status": "draft",
         "icon_key": None,
         "screenshot_keys": [],
@@ -109,17 +120,17 @@ async def create_app(db: Db, admin: CurrentAdmin, body: AppIn):
 
 
 @router.get("/{app_id}")
-async def get_app(db: Db, _: CurrentAdmin, app_id: str):
-    return app_admin(await get_app_or_404(db, app_id))
+async def get_app(db: Db, admin: CurrentAdmin, app_id: str):
+    return app_admin(await get_app_or_404(db, app_id, admin))
 
 
 @router.get("/{app_id}/preview")
-async def preview_app(db: Db, _: CurrentAdmin, app_id: str, draft: bool = False):
+async def preview_app(db: Db, admin: CurrentAdmin, app_id: str, draft: bool = False):
     """Fiche telle qu'elle sera affichée dans l'app client (même format que GET /apps/{id}), quel que soit le statut.
 
     `draft=true` : fiche avec les modifications en attente (brouillon de fiche) appliquées.
     """
-    app = await get_app_or_404(db, app_id)
+    app = await get_app_or_404(db, app_id, admin)
     if draft and app.get("listing_draft"):
         app = {**app, **{f: app["listing_draft"].get(f) for f in LISTING_FIELDS}}
     categories = await db.categories.find({"_id": {"$in": app.get("category_ids", [])}}).sort("order", 1).to_list(None)
@@ -143,8 +154,8 @@ async def _update_listing(db, admin: dict, app: dict, update: dict) -> dict:
 
 
 @router.patch("/{app_id}")
-async def update_app(db: Db, admin: CurrentAdmin, app_id: str, body: AppUpdate):
-    app = await get_app_or_404(db, app_id)
+async def update_app(db: Db, admin: Writer, app_id: str, body: AppUpdate):
+    app = await get_app_or_404(db, app_id, admin)
     update = body.model_dump(exclude_none=True, exclude={"category_ids"})
     if "android_package" in body.model_fields_set and body.android_package in (None, ""):
         update["android_package"] = None
@@ -167,14 +178,14 @@ async def _apply_status(db, admin: dict, app: dict, status: str, requested_by: s
 @router.post("/{app_id}/status")
 async def set_status(db: Db, admin: Publisher, app_id: str, body: AppStatusIn):
     """Brouillon / publié / archivé (dépublié), réservé aux admins complets. Les apps ne sont jamais supprimées physiquement."""
-    app = await get_app_or_404(db, app_id)
+    app = await get_app_or_404(db, app_id, admin)
     return await _apply_status(db, admin, app, body.status)
 
 
 @router.post("/{app_id}/status-request")
-async def request_status(db: Db, admin: CurrentAdmin, app_id: str, body: StatusRequestIn):
+async def request_status(db: Db, admin: Writer, app_id: str, body: StatusRequestIn):
     """Demande de changement de statut (publier / dépublier / brouillon), à valider par un admin complet."""
-    app = await get_app_or_404(db, app_id)
+    app = await get_app_or_404(db, app_id, admin)
     if body.status == app.get("status"):
         raise ApiError(409, "status_unchanged")
     if is_pending(app.get("status_request")):
@@ -187,7 +198,7 @@ async def request_status(db: Db, admin: CurrentAdmin, app_id: str, body: StatusR
 
 @router.post("/{app_id}/status-request/approve")
 async def approve_status_request(db: Db, admin: Publisher, app_id: str):
-    app = await get_app_or_404(db, app_id)
+    app = await get_app_or_404(db, app_id, admin)
     request = app.get("status_request")
     if not is_pending(request):
         raise ApiError(409, "review_not_pending")
@@ -196,7 +207,7 @@ async def approve_status_request(db: Db, admin: Publisher, app_id: str):
 
 @router.post("/{app_id}/status-request/reject")
 async def reject_status_request(db: Db, admin: Publisher, app_id: str, body: ReviewReject):
-    app = await get_app_or_404(db, app_id)
+    app = await get_app_or_404(db, app_id, admin)
     request = app.get("status_request")
     if not is_pending(request):
         raise ApiError(409, "review_not_pending")
@@ -213,9 +224,9 @@ async def reject_status_request(db: Db, admin: Publisher, app_id: str, body: Rev
 
 
 @router.delete("/{app_id}/status-request")
-async def withdraw_status_request(db: Db, admin: CurrentAdmin, app_id: str):
+async def withdraw_status_request(db: Db, admin: Writer, app_id: str):
     """Retire la demande (en attente) ou efface un refus. Réservé à son auteur ou à un admin complet."""
-    app = await get_app_or_404(db, app_id)
+    app = await get_app_or_404(db, app_id, admin)
     request = app.get("status_request")
     if not request:
         raise ApiError(409, "review_not_pending")
@@ -231,9 +242,9 @@ async def withdraw_status_request(db: Db, admin: CurrentAdmin, app_id: str):
 
 
 @router.post("/{app_id}/listing/submit")
-async def submit_listing(db: Db, admin: CurrentAdmin, app_id: str, body: ReviewSubmit):
+async def submit_listing(db: Db, admin: Writer, app_id: str, body: ReviewSubmit):
     """Soumet les modifications de fiche (brouillon) à la validation d'un admin complet."""
-    app = await get_app_or_404(db, app_id)
+    app = await get_app_or_404(db, app_id, admin)
     if not app.get("listing_draft"):
         raise ApiError(409, "no_listing_draft")
     if is_pending(app.get("listing_review")):
@@ -246,7 +257,7 @@ async def submit_listing(db: Db, admin: CurrentAdmin, app_id: str, body: ReviewS
 @router.post("/{app_id}/listing/publish")
 async def publish_listing(db: Db, storage: StorageDep, admin: Publisher, app_id: str):
     """Met en ligne le brouillon de fiche (validation d'une demande, ou publication directe par un admin complet)."""
-    app = await get_app_or_404(db, app_id)
+    app = await get_app_or_404(db, app_id, admin)
     draft = app.get("listing_draft")
     if not draft:
         raise ApiError(409, "no_listing_draft")
@@ -268,7 +279,7 @@ async def publish_listing(db: Db, storage: StorageDep, admin: Publisher, app_id:
 
 @router.post("/{app_id}/listing/reject")
 async def reject_listing(db: Db, admin: Publisher, app_id: str, body: ReviewReject):
-    app = await get_app_or_404(db, app_id)
+    app = await get_app_or_404(db, app_id, admin)
     review = app.get("listing_review")
     if not is_pending(review):
         raise ApiError(409, "review_not_pending")
@@ -278,9 +289,9 @@ async def reject_listing(db: Db, admin: Publisher, app_id: str, body: ReviewReje
 
 
 @router.delete("/{app_id}/listing/review")
-async def withdraw_listing_review(db: Db, admin: CurrentAdmin, app_id: str):
+async def withdraw_listing_review(db: Db, admin: Writer, app_id: str):
     """Retire la soumission (le brouillon est conservé). Réservé à son auteur ou à un admin complet."""
-    app = await get_app_or_404(db, app_id)
+    app = await get_app_or_404(db, app_id, admin)
     review = app.get("listing_review")
     if not review:
         raise ApiError(409, "review_not_pending")
@@ -293,9 +304,9 @@ async def withdraw_listing_review(db: Db, admin: CurrentAdmin, app_id: str):
 
 
 @router.delete("/{app_id}/listing")
-async def discard_listing(db: Db, storage: StorageDep, admin: CurrentAdmin, app_id: str):
+async def discard_listing(db: Db, storage: StorageDep, admin: Writer, app_id: str):
     """Abandonne les modifications de fiche : la fiche en ligne reste inchangée."""
-    app = await get_app_or_404(db, app_id)
+    app = await get_app_or_404(db, app_id, admin)
     if not app.get("listing_draft"):
         raise ApiError(409, "no_listing_draft")
     before = media_keys(app)
@@ -323,8 +334,8 @@ async def _store_image(storage: Storage, app_id, file: UploadFile, kind: str) ->
 
 
 @router.post("/{app_id}/icon")
-async def upload_icon(db: Db, storage: StorageDep, admin: CurrentAdmin, app_id: str, file: UploadFile = File(...)):
-    app = await get_app_or_404(db, app_id)
+async def upload_icon(db: Db, storage: StorageDep, admin: Writer, app_id: str, file: UploadFile = File(...)):
+    app = await get_app_or_404(db, app_id, admin)
     key = await _store_image(storage, app["_id"], file, "icon")
     previous = editable_listing(app).get("icon_key")
     updated = await _update_listing(db, admin, app, {"icon_key": key})
@@ -334,8 +345,8 @@ async def upload_icon(db: Db, storage: StorageDep, admin: CurrentAdmin, app_id: 
 
 
 @router.post("/{app_id}/screenshots")
-async def add_screenshots(db: Db, storage: StorageDep, admin: CurrentAdmin, app_id: str, files: list[UploadFile] = File(...)):
-    app = await get_app_or_404(db, app_id)
+async def add_screenshots(db: Db, storage: StorageDep, admin: Writer, app_id: str, files: list[UploadFile] = File(...)):
+    app = await get_app_or_404(db, app_id, admin)
     current = editable_listing(app).get("screenshot_keys") or []
     if len(current) + len(files) > MAX_SCREENSHOTS:
         raise ApiError(422, "too_many_screenshots")
@@ -352,9 +363,9 @@ def _key_from_url(url: str) -> str:
 
 
 @router.put("/{app_id}/screenshots")
-async def set_screenshots(db: Db, storage: StorageDep, admin: CurrentAdmin, app_id: str, body: ScreenshotsOrder):
+async def set_screenshots(db: Db, storage: StorageDep, admin: Writer, app_id: str, body: ScreenshotsOrder):
     """Réordonne / retire des captures : la liste d'URLs envoyée devient la galerie."""
-    app = await get_app_or_404(db, app_id)
+    app = await get_app_or_404(db, app_id, admin)
     current = editable_listing(app).get("screenshot_keys") or []
     keys = [k for k in (_key_from_url(u) for u in body.urls) if k in current]
     updated = await _update_listing(db, admin, app, {"screenshot_keys": keys})

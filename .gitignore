@@ -11,3 +11,4 @@ storage/
 firebase-service-account*.json
 service-account*.json
 *.p8
+.DS_Store

@@ -39,7 +39,11 @@ class AdminOut(BaseModel):
     name: str
     role: AdminRole
     active: bool
+    email_verified: bool = True
+    account_id: str | None = None
+    account: dict | None = None
     created_at: datetime | None = None
+    last_login_at: datetime | None = None
 
 
 class AdminSession(BaseModel):
@@ -159,18 +163,3 @@ class StatusRequestIn(BaseModel):
 class VersionUpdate(BaseModel):
     changelog: str | None = Field(default=None, max_length=20000)
     version_name: str | None = Field(default=None, min_length=1, max_length=50)
-
-
-# ---------- Administrateurs
-class AdminCreate(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=8, max_length=256)
-    name: str = Field(min_length=1, max_length=100)
-    role: AdminRole = "editor"
-
-
-class AdminUpdate(BaseModel):
-    name: str | None = Field(default=None, min_length=1, max_length=100)
-    role: AdminRole | None = None
-    active: bool | None = None
-    password: str | None = Field(default=None, min_length=8, max_length=256)

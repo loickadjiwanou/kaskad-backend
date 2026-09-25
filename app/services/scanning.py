@@ -156,7 +156,15 @@ async def scan_version(db: AsyncDatabase, storage: Storage, settings: Settings, 
         await db.apps.update_one(
             {"_id": version["app_id"], "android_package": {"$in": [None, ""]}}, {"$set": {"android_package": apk["package"]}}
         )
-    await log_system(db, f"version.scan_{status}", "version", version_id, {"errors": report["errors"][:5]})
+    app = await db.apps.find_one({"_id": version["app_id"]}, {"name": 1, "account_id": 1}) or {}
+    await log_system(
+        db,
+        f"version.scan_{status}",
+        "version",
+        version_id,
+        {"errors": report["errors"][:5], "app": app.get("name"), "version": version.get("version_name")},
+        account_id=app.get("account_id"),
+    )
     return status
 
 

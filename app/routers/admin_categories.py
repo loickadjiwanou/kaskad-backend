@@ -1,11 +1,13 @@
-"""Gestion des catégories : création, modification, réorganisation, réassignation d'apps, suppression."""
+"""Gestion des catégories (administrateur de la plateforme) : création, modification, réorganisation,
+réassignation d'apps, suppression. Les comptes développeurs les consultent pour classer leurs apps."""
 
 from fastapi import APIRouter
 
 from app.core.i18n import ApiError
-from app.deps import CurrentAdmin, Db
+from app.deps import CurrentAdmin, Db, Publisher
 from app.models.common import maybe_oid, now, oid
 from app.models.schemas import CategoryIn, CategoryOrder, CategoryReassign, CategoryUpdate
+from app.services.accounts import account_scope
 from app.services.activity import log_activity
 from app.services.catalog import category_out
 
@@ -20,19 +22,25 @@ async def _get(db, category_id: str) -> dict:
 
 
 @router.get("")
-async def list_categories(db: Db, _: CurrentAdmin):
+async def list_categories(db: Db, admin: CurrentAdmin):
     cats = await db.categories.find().sort([("order", 1), ("name", 1)]).to_list(None)
     counts = {
         r["_id"]: r["n"]
         for r in await (
-            await db.apps.aggregate([{"$unwind": "$category_ids"}, {"$group": {"_id": "$category_ids", "n": {"$sum": 1}}}])
+            await db.apps.aggregate(
+                [
+                    {"$match": account_scope(admin)},  # nombre d'apps du compte (toutes pour l'administrateur)
+                    {"$unwind": "$category_ids"},
+                    {"$group": {"_id": "$category_ids", "n": {"$sum": 1}}},
+                ]
+            )
         ).to_list(None)
     }
     return [{**category_out(c), "apps_count": counts.get(c["_id"], 0)} for c in cats]
 
 
 @router.post("", status_code=201)
-async def create_category(db: Db, admin: CurrentAdmin, body: CategoryIn):
+async def create_category(db: Db, admin: Publisher, body: CategoryIn):
     order = body.order
     if order is None:
         last = await db.categories.find().sort("order", -1).to_list(1)
@@ -44,7 +52,7 @@ async def create_category(db: Db, admin: CurrentAdmin, body: CategoryIn):
 
 
 @router.patch("/{category_id}")
-async def update_category(db: Db, admin: CurrentAdmin, category_id: str, body: CategoryUpdate):
+async def update_category(db: Db, admin: Publisher, category_id: str, body: CategoryUpdate):
     cat = await _get(db, category_id)
     update = {**body.model_dump(exclude_none=True), "updated_at": now()}
     await db.categories.update_one({"_id": cat["_id"]}, {"$set": update})
@@ -53,7 +61,7 @@ async def update_category(db: Db, admin: CurrentAdmin, category_id: str, body: C
 
 
 @router.put("/order")
-async def reorder_categories(db: Db, admin: CurrentAdmin, body: CategoryOrder):
+async def reorder_categories(db: Db, admin: Publisher, body: CategoryOrder):
     """Réorganisation : l'ordre de la liste d'IDs devient l'ordre d'affichage."""
     for index, cid in enumerate(body.ids, start=1):
         if o := maybe_oid(cid):
@@ -78,7 +86,7 @@ async def _move_apps(db, source, target, app_ids=None) -> int:
 
 
 @router.post("/{category_id}/reassign")
-async def reassign_apps(db: Db, admin: CurrentAdmin, category_id: str, body: CategoryReassign):
+async def reassign_apps(db: Db, admin: Publisher, category_id: str, body: CategoryReassign):
     source = await _get(db, category_id)
     target = await _get(db, body.to_category_id)
     app_ids = [o for o in (maybe_oid(a) for a in body.app_ids)] if body.app_ids is not None else None
@@ -88,7 +96,7 @@ async def reassign_apps(db: Db, admin: CurrentAdmin, category_id: str, body: Cat
 
 
 @router.delete("/{category_id}", status_code=204)
-async def delete_category(db: Db, admin: CurrentAdmin, category_id: str, reassign_to: str | None = None):
+async def delete_category(db: Db, admin: Publisher, category_id: str, reassign_to: str | None = None):
     """Supprime une catégorie. Si des apps l'utilisent, `reassign_to` est obligatoire (les apps y sont déplacées)."""
     cat = await _get(db, category_id)
     in_use = await db.apps.count_documents({"$or": [{"category_ids": cat["_id"]}, {"listing_draft.category_ids": cat["_id"]}]})

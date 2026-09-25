@@ -6,9 +6,21 @@ from pymongo.asynchronous.database import AsyncDatabase
 from app.models.common import now, sid
 
 
-async def log_activity(db: AsyncDatabase, admin: dict, action: str, target_type: str, target_id, details: dict | None = None):
+async def log_activity(
+    db: AsyncDatabase, admin: dict, action: str, target_type: str, target_id, details: dict | None = None, account_id=None
+):
+    """`account_id` : compte concerné. Par défaut, celui de l'app visée (action sur une app ou une version),
+    sinon celui de l'auteur : une validation par l'administrateur apparaît ainsi dans le journal du compte."""
+    if account_id is None and isinstance(target_id, ObjectId) and target_type in ("app", "version"):
+        app_id = target_id
+        if target_type == "version":
+            version = await db.versions.find_one({"_id": target_id}, {"app_id": 1})
+            app_id = version and version["app_id"]
+        app = await db.apps.find_one({"_id": app_id}, {"account_id": 1}) if app_id else None
+        account_id = (app or {}).get("account_id")
     await db.activity_log.insert_one(
         {
+            "account_id": account_id or admin.get("account_id"),
             "actor_id": admin["_id"],
             "actor_email": admin.get("email"),
             "actor_name": admin.get("name"),
@@ -21,9 +33,10 @@ async def log_activity(db: AsyncDatabase, admin: dict, action: str, target_type:
     )
 
 
-async def log_system(db: AsyncDatabase, action: str, target_type: str, target_id, details: dict | None = None):
+async def log_system(db: AsyncDatabase, action: str, target_type: str, target_id, details: dict | None = None, account_id=None):
     await db.activity_log.insert_one(
         {
+            "account_id": account_id,
             "actor_id": None,
             "actor_email": "system",
             "actor_name": "Kaskad",
