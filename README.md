@@ -419,7 +419,7 @@ Routes require a console access token, except sign-up, email confirmation and in
 | GET | `/admin/stats/export.csv` | CSV export (one line per download) |
 | GET | `/admin/moderation/queue` | **admin** — Versions not published yet (scanning, rejected or awaiting publication) |
 | GET | `/admin/moderation/reviews` | **admin** — Review requests (pending or rejected): versions, status requests, listing drafts |
-| GET | `/admin/activity` | Activity log (`action` prefix, `actor_id`, pagination) |
+| GET | `/admin/activity` | **owner** — activity of the account: members' actions, platform decisions on its apps, scan results (`action` prefix, `actor_id`, pagination; `account_id` for the platform admin, who sees everything) |
 
 ---
 

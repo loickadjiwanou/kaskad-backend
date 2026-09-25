@@ -115,6 +115,14 @@ async def test_invitations_and_roles(app, client, admin_headers):
     # La plateforme valide
     assert (await client.post(f"{API}/admin/versions/{v['id']}/publish", headers=admin_headers)).status_code == 200
 
+    # Journal d'activité : réservé au propriétaire (toute l'activité du compte, dont celle des membres)
+    assert (await client.get(f"{API}/admin/activity", headers=dev)).status_code == 403
+    assert (await client.get(f"{API}/admin/activity", headers=viewer)).status_code == 403
+    log = (await client.get(f"{API}/admin/activity", headers=owner)).json()["items"]
+    actions = {(e["actor_name"], e["action"]) for e in log}
+    assert {("Dev", "app.created"), ("Dev", "version.submitted"), ("Dev", "member.joined")} <= actions
+    assert ("Administrator", "version.published") in actions  # validation par la plateforme sur l'app du compte
+
     # Lecteur : consultation seule
     assert (await client.get(f"{API}/admin/apps/{a['id']}", headers=viewer)).status_code == 200
     r = await client.post(f"{API}/admin/apps", json={"name": "Nope"}, headers=viewer)

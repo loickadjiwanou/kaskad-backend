@@ -9,7 +9,7 @@ from typing import Literal
 from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
 
-from app.deps import CurrentAdmin, Db, FullAdmin
+from app.deps import CurrentAdmin, Db, FullAdmin, TeamManager
 from app.models.common import maybe_oid, now, sid
 from app.routers.admin_apps import get_app_or_404
 from app.services.accounts import account_scope, is_platform_admin, scoped_app_ids
@@ -216,7 +216,7 @@ async def moderation_reviews(db: Db, admin: FullAdmin):
 @router.get("/activity")
 async def activity(
     db: Db,
-    admin: CurrentAdmin,
+    admin: TeamManager,  # propriétaires (activité de leur compte) et administrateur de la plateforme (tout)
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=50, ge=1, le=200),
     action: str | None = None,
