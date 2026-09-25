@@ -6,18 +6,21 @@ Une version n'est publiable qu'après validation de l'analyse de sécurité.
 
 import hashlib
 import re
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, UploadFile
 from pymongo.errors import DuplicateKeyError
 
 from app.core.config import get_settings
 from app.core.i18n import ApiError
-from app.deps import CurrentAdmin, Db, Publisher, PushDep, ScanQueueDep, StorageDep, Writer
+from app.deps import CurrentAdmin, Db, MailerDep, Publisher, PushDep, ScanQueueDep, StorageDep, Writer
 from app.models.common import CONTENT_TYPES, EXTENSIONS, FORMATS_BY_PLATFORM, SEMVER_PATTERN, FileFormat, Platform, now, oid
-from app.models.schemas import ReviewReject, ReviewSubmit, VersionUpdate
+from app.models.schemas import Channel, PublishIn, ReviewReject, ReviewSubmit, VersionUpdate
 from app.routers.admin_apps import get_app_or_404
 from app.services.activity import log_activity
 from app.services.catalog import refresh_app_catalog_fields, version_admin
+from app.services.notify import notify_member, review_requested
+from app.services.releases import go_live, is_beta
 from app.services.review import decision, is_full_admin, is_pending, submission
 
 router = APIRouter(prefix="/admin", tags=["admin: versions"])
@@ -29,6 +32,14 @@ def _file_name(app_name: str, version_name: str, platform: str, fmt: str) -> str
     ext = "AppImage" if fmt == "appimage" else fmt
     base = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{app_name}-{version_name}-{platform}").strip("_")
     return f"{base}.{ext}"
+
+
+def _future(dt: datetime | None) -> datetime | None:
+    """Date de publication programmée (UTC) si elle est dans le futur, sinon None (publication immédiate)."""
+    if dt is None:
+        return None
+    dt = dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    return dt if dt > now() else None
 
 
 async def _get_version(db, version_id: str, admin: dict) -> dict:
@@ -66,10 +77,26 @@ async def upload_version(
     platform: Platform = Form(...),
     file_format: FileFormat = Form(...),
     changelog: str = Form(default="", max_length=20000),
+    changelog_fr: str | None = Form(default=None, max_length=20000),
+    changelog_en: str | None = Form(default=None, max_length=20000),
+    channel: Channel = Form(default="production"),
+    submit: bool = Form(default=False),
+    submit_note: str = Form(default="", max_length=2000),
+    publish_at: datetime | None = Form(default=None),
 ):
-    """Upload d'un binaire : le SHA-256 est calculé à la volée, puis l'analyse de sécurité est lancée."""
+    """Upload d'un binaire : le SHA-256 est calculé à la volée, puis l'analyse de sécurité est lancée.
+
+    Notes de version : `changelog` (langue principale de l'app) ou `changelog_fr` / `changelog_en`.
+    `channel` : `production` ou `beta` (testeurs uniquement). `submit=true` (intégration continue) : la version est
+    soumise automatiquement à validation dès que l'analyse de sécurité est validée, avec `submit_note` et `publish_at`.
+    """
     settings = get_settings()
     app = await get_app_or_404(db, app_id, admin)
+    base_lang = app.get("default_language", "fr")
+    texts = {"fr": changelog_fr, "en": changelog_en}
+    if texts[base_lang] is None:
+        texts[base_lang] = changelog
+    other = "en" if base_lang == "fr" else "fr"
     if not re.match(SEMVER_PATTERN, version_name):
         raise ApiError(422, "invalid_version_name")
     if file_format not in FORMATS_BY_PLATFORM[platform]:
@@ -87,7 +114,13 @@ async def upload_version(
         "version_code": version_code,
         "platform": platform,
         "file_format": file_format,
-        "changelog": changelog,
+        "changelog": texts[base_lang] or "",
+        "changelog_lang": base_lang,
+        "changelog_translations": {other: texts[other]} if texts[other] else {},
+        "channel": channel,
+        "auto_submit": (
+            {"note": submit_note, "publish_at": _future(publish_at), "by": admin["_id"], "by_name": admin.get("name")} if submit else None
+        ),
         "file_name": _file_name(app["name"], version_name, platform, file_format),
         "original_file_name": file.filename,
         "status": "draft",
@@ -154,6 +187,9 @@ async def update_version(db: Db, admin: Writer, version_id: str, body: VersionUp
         raise ApiError(403, "publish_requires_admin")
     if body.version_name and not re.match(SEMVER_PATTERN, body.version_name):
         raise ApiError(422, "invalid_version_name")
+    # Le canal se choisit avant la mise en ligne ; ensuite, une bêta passe en production par la publication
+    if body.channel is not None and body.channel != v.get("channel", "production") and v.get("status") != "draft":
+        raise ApiError(409, "version_locked")
     update = {**body.model_dump(exclude_none=True), "updated_at": now()}
     # Modifier une version soumise annule la demande : elle doit être soumise à nouveau
     if v.get("status") == "draft" and v.get("review"):
@@ -165,26 +201,60 @@ async def update_version(db: Db, admin: Writer, version_id: str, body: VersionUp
     return version_admin(await db.versions.find_one({"_id": v["_id"]}))
 
 
+async def _ensure_testers(db, v: dict) -> None:
+    """Version bêta à soumettre ou publier : l'app doit avoir au moins MIN_BETA_TESTERS testeurs."""
+    if not is_beta(v) or v.get("status") == "published":
+        return
+    minimum = get_settings().min_beta_testers
+    app = await db.apps.find_one({"_id": v["app_id"]}, {"testers": 1})
+    if len((app or {}).get("testers") or []) < minimum:
+        raise ApiError(409, "not_enough_testers", min=minimum)
+
+
 def _submittable(v: dict) -> bool:
-    return v.get("upload_status") == "stored" and v.get("security_scan_status") == "passed" and v.get("status") == "draft"
+    """Version validée par l'analyse et pas encore en ligne, ou bêta en ligne (demande de passage en production)."""
+    stored = v.get("upload_status") == "stored" and v.get("security_scan_status") == "passed"
+    return stored and (v.get("status") == "draft" or (v.get("status") == "published" and is_beta(v)))
 
 
 @router.post("/versions/{version_id}/submit")
-async def submit_version(db: Db, admin: Writer, version_id: str, body: ReviewSubmit):
+async def submit_version(db: Db, background: BackgroundTasks, mailer: MailerDep, admin: Writer, version_id: str, body: ReviewSubmit):
     """Soumet une version validée par l'analyse de sécurité à la validation d'un admin complet."""
     v = await _get_version(db, version_id, admin)
     if not _submittable(v):
         raise ApiError(409, "not_submittable")
     if is_pending(v.get("review")):
         raise ApiError(409, "already_submitted")
-    await db.versions.update_one({"_id": v["_id"]}, {"$set": {"review": submission(admin, body.note), "updated_at": now()}})
+    await _ensure_testers(db, v)
+    promote = v.get("status") == "published"
+    review = submission(
+        admin, body.note, kind="promote" if promote else "publish", publish_at=None if promote else _future(body.publish_at)
+    )
+    await db.versions.update_one({"_id": v["_id"]}, {"$set": {"review": review, "updated_at": now()}})
     app = await db.apps.find_one({"_id": v["app_id"]})
-    await log_activity(db, admin, "version.submitted", "version", v["_id"], {"app": app["name"], "version": v["version_name"]})
+    await log_activity(
+        db,
+        admin,
+        "version.promotion_requested" if promote else "version.submitted",
+        "version",
+        v["_id"],
+        {"app": app["name"], "version": v["version_name"], "publish_at": review.get("publish_at")},
+    )
+    background.add_task(
+        review_requested,
+        db,
+        mailer,
+        admin,
+        app,
+        "promotion" if promote else "version",
+        version=v["version_name"],
+        note=body.note or None,
+    )
     return version_admin(await db.versions.find_one({"_id": v["_id"]}))
 
 
 @router.post("/versions/{version_id}/reject")
-async def reject_version(db: Db, admin: Publisher, version_id: str, body: ReviewReject):
+async def reject_version(db: Db, background: BackgroundTasks, mailer: MailerDep, admin: Publisher, version_id: str, body: ReviewReject):
     """Refus motivé d'une version soumise : son auteur voit le motif et peut la corriger puis la soumettre à nouveau."""
     v = await _get_version(db, version_id, admin)
     if not is_pending(v.get("review")):
@@ -196,6 +266,18 @@ async def reject_version(db: Db, admin: Publisher, version_id: str, body: Review
     await log_activity(
         db, admin, "version.rejected", "version", v["_id"], {"app": app["name"], "version": v["version_name"], "reason": body.reason}
     )
+    # L'auteur de la soumission est prévenu, avec le motif
+    background.add_task(
+        notify_member,
+        db,
+        mailer,
+        v["review"].get("submitted_by"),
+        "version_rejected",
+        f"/apps/{app['_id']}?tab=versions",
+        app=app["name"],
+        version=v["version_name"],
+        reason=body.reason,
+    )
     return version_admin(await db.versions.find_one({"_id": v["_id"]}))
 
 
@@ -204,7 +286,7 @@ async def withdraw_version(db: Db, admin: Writer, version_id: str):
     """Retire la soumission (ou efface un refus). Réservé à son auteur ou à un admin complet."""
     v = await _get_version(db, version_id, admin)
     review = v.get("review")
-    if not review or v.get("status") != "draft":
+    if not review or v.get("status") not in ("draft", "published"):
         raise ApiError(409, "review_not_pending")
     if review.get("submitted_by") != admin["_id"] and not is_full_admin(admin):
         raise ApiError(403, "forbidden")
@@ -215,33 +297,76 @@ async def withdraw_version(db: Db, admin: Writer, version_id: str):
 
 
 @router.post("/versions/{version_id}/publish")
-async def publish_version(db: Db, admin: Publisher, push: PushDep, background: BackgroundTasks, version_id: str):
-    """Publication manuelle par un admin complet, uniquement après validation de l'analyse de sécurité.
+async def publish_version(
+    db: Db,
+    admin: Publisher,
+    push: PushDep,
+    mailer: MailerDep,
+    background: BackgroundTasks,
+    version_id: str,
+    body: PublishIn | None = None,
+):
+    """Publication par l'administrateur de la plateforme (valide la demande si la version avait été soumise).
 
-    Valide la demande de l'éditeur si la version avait été soumise. Notifie les abonnés de l'app.
+    - version validée par l'analyse : mise en ligne immédiate, ou programmée à `publish_at`
+      (par défaut, la date demandée lors de la soumission) ;
+    - version programmée : mise en ligne immédiate ;
+    - version bêta déjà en ligne : passage en production.
     """
     v = await _get_version(db, version_id, admin)
     if v.get("upload_status") != "stored" or v.get("security_scan_status") != "passed":
         raise ApiError(409, "scan_not_passed")
-    if v.get("status") != "published":
-        update = {"status": "published", "published_at": now(), "updated_at": now()}
-        review = v.get("review")
-        if is_pending(review):
-            update["review"] = {**review, **decision(admin, "approved")}
-        await db.versions.update_one({"_id": v["_id"]}, {"$set": update})
-        await refresh_app_catalog_fields(db, v["app_id"])
-        app = await db.apps.find_one({"_id": v["app_id"]})
-        details = {"app": app["name"], "version": v["version_name"]}
-        if is_pending(review):
-            details["requested_by"] = review.get("submitted_by_name")
-        await log_activity(db, admin, "version.published", "version", v["_id"], details)
-        # Notifications push seulement si l'app est visible et que c'est la version la plus récente de sa plateforme
-        newer = await db.versions.count_documents(
-            {"app_id": v["app_id"], "platform": v["platform"], "status": "published", "version_code": {"$gt": v["version_code"]}}
+    if v.get("status") == "published" and not is_beta(v):
+        return version_admin(v)
+    await _ensure_testers(db, v)
+    review = v.get("review")
+    approved = {**review, **decision(admin, "approved")} if is_pending(review) else review
+    # Date demandée lors de la soumission, sauf date choisie par l'administrateur
+    requested = (review or {}).get("publish_at") if is_pending(review) else None
+    publish_at = _future((body.publish_at if body else None) or requested)
+    if v.get("status") == "draft" and publish_at:
+        await db.versions.update_one(
+            {"_id": v["_id"]}, {"$set": {"status": "scheduled", "scheduled_at": publish_at, "review": approved, "updated_at": now()}}
         )
-        if app.get("status") == "published" and not newer:
-            version = await db.versions.find_one({"_id": v["_id"]})
-            background.add_task(push.notify_new_version, db, app, version)
+        app = await db.apps.find_one({"_id": v["app_id"]})
+        await log_activity(
+            db,
+            admin,
+            "version.scheduled",
+            "version",
+            v["_id"],
+            {"app": app["name"], "version": v["version_name"], "publish_at": publish_at},
+        )
+        if is_pending(review):
+            background.add_task(
+                notify_member,
+                db,
+                mailer,
+                review.get("submitted_by"),
+                "version_scheduled",
+                f"/apps/{app['_id']}?tab=versions",
+                app=app["name"],
+                version=v["version_name"],
+                date=publish_at,
+            )
+        return version_admin(await db.versions.find_one({"_id": v["_id"]}))
+    if approved is not review:
+        await db.versions.update_one({"_id": v["_id"]}, {"$set": {"review": approved}})
+    # L'auteur n'est prévenu qu'en cas de validation d'une demande
+    to_notify = {**v, "review": review if is_pending(review) else None}
+    return version_admin(await go_live(db, push, mailer, to_notify, admin, background))
+
+
+@router.post("/versions/{version_id}/unschedule")
+async def unschedule_version(db: Db, admin: Writer, version_id: str):
+    """Annule une publication programmée : la version repasse en brouillon (à soumettre de nouveau)."""
+    v = await _get_version(db, version_id, admin)
+    if v.get("status") != "scheduled":
+        raise ApiError(409, "review_not_pending")
+    await db.versions.update_one(
+        {"_id": v["_id"]}, {"$set": {"status": "draft", "scheduled_at": None, "review": None, "updated_at": now()}}
+    )
+    await log_activity(db, admin, "version.unscheduled", "version", v["_id"], {"version": v["version_name"]})
     return version_admin(await db.versions.find_one({"_id": v["_id"]}))
 
 

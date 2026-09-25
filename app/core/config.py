@@ -60,6 +60,16 @@ class Settings(BaseSettings):
     # URL de la console (liens des e-mails : confirmation, invitation)
     console_url: str = "http://localhost:5173"
     email_verification_ttl_hours: int = 48
+    password_reset_ttl_minutes: int = 60
+    # Canal bêta : testeurs requis pour soumettre ou publier une version bêta
+    min_beta_testers: int = 3
+    # Lien d'ouverture d'une app dans le client Kaskad (e-mails aux testeurs)
+    app_link_base: str = "kaskad://app/"
+    # Pages web publiques des apps (liens partagés) : adresse publique du serveur qui les sert (par défaut PUBLIC_BASE_URL)
+    public_web_url: str | None = None
+    # Où télécharger l'app Kaskad (bouton des pages publiques quand l'app n'est pas installée) ; vide = bouton masqué
+    kaskad_download_url: str | None = None
+    android_package_id: str = "com.kaskad.store"
     invitation_ttl_days: int = 7
 
     # --- Stockage des binaires (jamais dans MongoDB)

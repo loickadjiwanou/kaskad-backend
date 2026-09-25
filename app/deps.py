@@ -10,6 +10,7 @@ from app.core.ratelimit import LoginRateLimiter
 from app.core.security import decode_token
 from app.models.common import maybe_oid
 from app.services.accounts import can_manage_team, can_write
+from app.services.api_keys import API_KEY_PREFIX, api_key_admin
 from app.services.mailer import Mailer
 from app.services.notifications import PushService
 from app.services.scanning import ScanQueue
@@ -64,10 +65,17 @@ def _access_payload(creds: HTTPAuthorizationCredentials | None, scope: str) -> d
 
 
 async def current_admin(db: Db, creds: Credentials) -> dict:
+    # Clé API d'un compte développeur (intégration continue) : droits d'un développeur de ce compte
+    if creds and creds.credentials.startswith(API_KEY_PREFIX):
+        return await api_key_admin(db, creds.credentials)
     payload = _access_payload(creds, "admin")
     admin = await db.admins.find_one({"_id": maybe_oid(payload["sub"])})
     if not admin or not admin.get("active", True):
         raise ApiError(401, "invalid_token")
+    # Compte développeur suspendu : sessions en cours refusées (jamais l'administrateur de la plateforme)
+    if admin.get("role") != "admin" and admin.get("account_id"):
+        if await db.accounts.find_one({"_id": admin["account_id"], "suspended": True}, {"_id": 1}):
+            raise ApiError(401, "account_suspended")
     return admin
 
 

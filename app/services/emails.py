@@ -1,5 +1,6 @@
 """Contenu des e-mails (français / anglais), dans la langue de la console au moment de l'envoi."""
 
+from datetime import datetime
 from html import escape
 
 from app.services.mailer import Email
@@ -87,7 +88,7 @@ def _layout(lang: str, title: str, paragraphs: list[str], button: str, url: str,
 
 
 def _text(title: str, paragraphs: list[str], button: str, url: str, small: list[str]) -> str:
-    return "\n\n".join([title, *paragraphs, f"{button} : {url}", *small])
+    return "\n\n".join([title, *paragraphs, f"{button}\n{url}", *small])
 
 
 def verification_email(lang: str, to_email: str, name: str, account: str, url: str, hours: int) -> Email:
@@ -113,6 +114,261 @@ def invitation_email(lang: str, to_email: str, inviter: str, account: str, role:
         to_email=to_email,
         to_name=None,
         subject=t["subject"].format(inviter=inviter),
+        html=_layout(lang, title, paragraphs, t["button"], url, small),
+        text=_text(title, paragraphs, t["button"], url, small),
+    )
+
+
+# ---------------------------------------------------------------- mot de passe oublié
+
+RESET = {
+    "fr": {
+        "subject": "Réinitialisez votre mot de passe — Kaskad Console",
+        "title": "Réinitialisation du mot de passe",
+        "greeting": "Bonjour {name},",
+        "body": "Nous avons reçu une demande de réinitialisation du mot de passe de votre compte Kaskad Console.",
+        "button": "Choisir un nouveau mot de passe",
+        "expiry": "Ce lien est valable {minutes} minutes et ne peut servir qu'une fois.",
+        "ignore": "Si vous n'êtes pas à l'origine de cette demande, ignorez cet e-mail : votre mot de passe reste inchangé.",
+    },
+    "en": {
+        "subject": "Reset your password — Kaskad Console",
+        "title": "Password reset",
+        "greeting": "Hi {name},",
+        "body": "We received a request to reset the password of your Kaskad Console account.",
+        "button": "Choose a new password",
+        "expiry": "This link is valid for {minutes} minutes and can only be used once.",
+        "ignore": "If you didn't ask for this, ignore this email: your password stays unchanged.",
+    },
+}
+
+
+def reset_password_email(lang: str, to_email: str, name: str, url: str, minutes: int) -> Email:
+    t = RESET[lang]
+    paragraphs = [t["greeting"].format(name=name), t["body"]]
+    small = [t["expiry"].format(minutes=minutes), t["ignore"]]
+    return Email(
+        to_email=to_email,
+        to_name=name,
+        subject=t["subject"],
+        html=_layout(lang, t["title"], paragraphs, t["button"], url, small),
+        text=_text(t["title"], paragraphs, t["button"], url, small),
+    )
+
+
+# ---------------------------------------------------------------- testeurs de la bêta
+
+TESTER = {
+    "fr": {
+        "subject": "Vous êtes invité à tester {app}",
+        "title": "Testez {app} en avant-première",
+        "body": "{account} vous a ajouté comme testeur de {app} sur Kaskad. Vous pourrez voir et télécharger ses versions bêta avant leur publication pour tous.",
+        "how": "Connectez-vous à l'app Kaskad (mobile ou ordinateur) avec l'adresse {email}. Pas encore de compte ? Créez-le dans l'app avec cette adresse.",
+        "button": "Ouvrir {app} dans Kaskad",
+        "ignore": "Si vous ne souhaitez pas tester cette application, ignorez cet e-mail.",
+    },
+    "en": {
+        "subject": "You're invited to test {app}",
+        "title": "Try {app} before everyone else",
+        "body": "{account} added you as a tester of {app} on Kaskad. You'll be able to see and download its beta versions before they are released to everyone.",
+        "how": "Sign in to the Kaskad app (mobile or desktop) with {email}. No account yet? Create one in the app with this address.",
+        "button": "Open {app} in Kaskad",
+        "ignore": "If you don't want to test this app, just ignore this email.",
+    },
+}
+
+
+def tester_email(lang: str, to_email: str, app: str, account: str, url: str) -> Email:
+    t = TESTER[lang]
+    title = t["title"].format(app=app)
+    paragraphs = [t["body"].format(account=account, app=app), t["how"].format(email=to_email)]
+    button = t["button"].format(app=app)
+    small = [t["ignore"]]
+    return Email(
+        to_email=to_email,
+        to_name=None,
+        subject=t["subject"].format(app=app),
+        html=_layout(lang, title, paragraphs, button, url, small),
+        text=_text(title, paragraphs, button, url, small),
+    )
+
+
+# ---------------------------------------------------------------- réponse du développeur à un avis (utilisateur de l'app)
+
+REVIEW_REPLY = {
+    "fr": {
+        "subject": "{developer} a répondu à votre avis sur {app}",
+        "title": "Réponse à votre avis",
+        "body": "{developer} a répondu à l'avis que vous avez laissé sur {app} :",
+        "button": "Voir dans Kaskad",
+        "small": "Vous recevez cet e-mail car vous avez publié un avis dans l'app Kaskad.",
+    },
+    "en": {
+        "subject": "{developer} replied to your review of {app}",
+        "title": "Reply to your review",
+        "body": "{developer} replied to the review you left on {app}:",
+        "button": "View in Kaskad",
+        "small": "You receive this email because you posted a review in the Kaskad app.",
+    },
+}
+
+
+def review_reply_email(lang: str, to_email: str, app: str, developer: str, reply: str, url: str) -> Email:
+    lang = lang if lang in REVIEW_REPLY else "fr"
+    t = REVIEW_REPLY[lang]
+    paragraphs = [t["body"].format(developer=developer, app=app), f"« {reply} »" if lang == "fr" else f"“{reply}”"]
+    return Email(
+        to_email=to_email,
+        to_name=None,
+        subject=t["subject"].format(developer=developer, app=app),
+        html=_layout(lang, t["title"], paragraphs, t["button"], url, [t["small"]]),
+        text=_text(t["title"], paragraphs, t["button"], url, [t["small"]]),
+    )
+
+
+REPORT_REASONS = {
+    "fr": {
+        "malware": "logiciel malveillant",
+        "abusive": "contenu abusif",
+        "copyright": "atteinte aux droits d'auteur",
+        "misleading": "fiche trompeuse",
+        "broken": "app qui ne fonctionne pas",
+        "other": "autre",
+    },
+    "en": {
+        "malware": "malware",
+        "abusive": "abusive content",
+        "copyright": "copyright infringement",
+        "misleading": "misleading listing",
+        "broken": "app not working",
+        "other": "other",
+    },
+}
+
+
+# ---------------------------------------------------------------- suivi des demandes et du compte
+
+STATUS_LABELS = {
+    "fr": {"published": "publication", "archived": "dépublication", "draft": "retour en brouillon"},
+    "en": {"published": "publishing", "archived": "unpublishing", "draft": "move back to draft"},
+}
+SUBJECT_LABELS = {
+    "fr": {
+        "version": "la version {version}",
+        "promotion": "le passage en production de la version bêta {version}",
+        "status": "la {status}",
+        "listing": "les modifications de la fiche",
+    },
+    "en": {
+        "version": "version {version}",
+        "promotion": "the promotion to production of beta version {version}",
+        "status": "{status}",
+        "listing": "the listing changes",
+    },
+}
+
+NOTIFICATIONS = {
+    "fr": {
+        "version_published": (
+            "Version publiée : {app} {version}",
+            "La version {version} de {app} a été validée et publiée. Elle est maintenant disponible au téléchargement.",
+        ),
+        "version_scheduled": (
+            "Version programmée : {app} {version}",
+            "La version {version} de {app} a été validée. Elle sera publiée automatiquement le {date}.",
+        ),
+        "version_rejected": (
+            "Version refusée : {app} {version}",
+            "La version {version} de {app} a été refusée par l'administrateur de la plateforme.",
+        ),
+        "status_approved": ("Demande approuvée : {app}", "Votre demande de {status} de {app} a été approuvée."),
+        "status_rejected": ("Demande refusée : {app}", "Votre demande de {status} de {app} a été refusée."),
+        "listing_published": ("Fiche mise à jour : {app}", "Les modifications de la fiche de {app} ont été validées et sont en ligne."),
+        "listing_rejected": ("Modifications refusées : {app}", "Les modifications de la fiche de {app} ont été refusées."),
+        "review_requested": ("À valider : {app}", "{member} ({account}) a soumis {subject} de {app} pour validation."),
+        "app_reported": (
+            "Signalement : {app}",
+            "Un utilisateur a signalé {app} (motif : {reason}). Le signalement vous attend dans la Modération.",
+        ),
+        "account_suspended": (
+            "Compte suspendu : {account}",
+            "Le compte développeur « {account} » a été suspendu par l'administrateur de la plateforme. Ses applications ne sont plus visibles dans le store et ses membres ne peuvent plus se connecter.",
+        ),
+        "account_reactivated": (
+            "Compte réactivé : {account}",
+            "Le compte développeur « {account} » a été réactivé. Ses applications sont de nouveau visibles et ses membres peuvent se connecter.",
+        ),
+    },
+    "en": {
+        "version_published": (
+            "Version published: {app} {version}",
+            "Version {version} of {app} was approved and published. It is now available for download.",
+        ),
+        "version_scheduled": (
+            "Version scheduled: {app} {version}",
+            "Version {version} of {app} was approved. It will be published automatically on {date}.",
+        ),
+        "version_rejected": ("Version rejected: {app} {version}", "Version {version} of {app} was rejected by the platform admin."),
+        "status_approved": ("Request approved: {app}", "Your {status} request for {app} was approved."),
+        "status_rejected": ("Request rejected: {app}", "Your {status} request for {app} was rejected."),
+        "listing_published": ("Listing updated: {app}", "The listing changes of {app} were approved and are live."),
+        "listing_rejected": ("Changes rejected: {app}", "The listing changes of {app} were rejected."),
+        "review_requested": ("To review: {app}", "{member} ({account}) submitted {subject} of {app} for review."),
+        "app_reported": ("Report: {app}", "A user reported {app} (reason: {reason}). The report is waiting for you in Moderation."),
+        "account_suspended": (
+            "Account suspended: {account}",
+            "The developer account “{account}” was suspended by the platform admin. Its apps are no longer visible in the store and its members can no longer sign in.",
+        ),
+        "account_reactivated": (
+            "Account reactivated: {account}",
+            "The developer account “{account}” was reactivated. Its apps are visible again and its members can sign in.",
+        ),
+    },
+}
+NOTIFICATION_TEXT = {
+    "fr": {
+        "greeting": "Bonjour {name},",
+        "reason": "Motif : {reason}",
+        "note": "Note : {note}",
+        "button": "Ouvrir dans la console",
+        "fix": "Corrigez ce qui est indiqué puis soumettez à nouveau depuis la console.",
+    },
+    "en": {
+        "greeting": "Hi {name},",
+        "reason": "Reason: {reason}",
+        "note": "Note: {note}",
+        "button": "Open in the console",
+        "fix": "Fix what is described, then submit again from the console.",
+    },
+}
+
+
+def notification_email(lang: str, kind: str, to_email: str, name: str, url: str, **ctx) -> Email:
+    """E-mail de suivi : décision sur une demande, demande à valider, suspension du compte."""
+    ctx = {k: v for k, v in ctx.items() if v is not None}
+    if isinstance(ctx.get("date"), datetime):
+        # Date en temps universel (le destinataire peut être dans n'importe quel fuseau)
+        ctx["date"] = ctx["date"].strftime("%d/%m/%Y à %H:%M UTC" if lang == "fr" else "%Y-%m-%d at %H:%M UTC")
+    if kind == "app_reported" and "reason" in ctx:
+        ctx["reason"] = REPORT_REASONS[lang].get(ctx["reason"], ctx["reason"])
+    if "status" in ctx:
+        ctx["status"] = STATUS_LABELS[lang].get(ctx["status"], ctx["status"])
+    if "subject_kind" in ctx:
+        ctx["subject"] = SUBJECT_LABELS[lang][ctx.pop("subject_kind")].format(**ctx)
+    subject, body = NOTIFICATIONS[lang][kind]
+    t = NOTIFICATION_TEXT[lang]
+    fmt = {"app": "", "version": "", "account": "", "member": "", "status": "", "subject": "", "date": "", **ctx}
+    title = subject.format(**fmt)
+    paragraphs = [t["greeting"].format(name=name or ""), body.format(**fmt)]
+    if ctx.get("reason") and kind != "app_reported":
+        paragraphs.append(t["reason"].format(reason=ctx["reason"]))
+    if ctx.get("note"):
+        paragraphs.append(t["note"].format(note=ctx["note"]))
+    small = [t["fix"]] if kind.endswith("_rejected") else []
+    return Email(
+        to_email=to_email,
+        to_name=name,
+        subject=f"{title} — Kaskad Console",
         html=_layout(lang, title, paragraphs, t["button"], url, small),
         text=_text(title, paragraphs, t["button"], url, small),
     )

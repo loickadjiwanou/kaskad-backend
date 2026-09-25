@@ -37,7 +37,7 @@ async def test_anonymous_then_register_keeps_account(client):
 
     headers = {"Authorization": f"Bearer {anon['access_token']}"}
     reg = (await client.post(f"{API}/auth/register", json={"email": "Me@Example.com", "password": "password123"}, headers=headers)).json()
-    assert reg["user"] == {"id": anon["user"]["id"], "email": "me@example.com", "anonymous": False}
+    assert reg["user"] == {"id": anon["user"]["id"], "email": "me@example.com", "name": None, "anonymous": False}
 
     dup = await client.post(f"{API}/auth/register", json={"email": "me@example.com", "password": "password123"})
     assert dup.status_code == 409

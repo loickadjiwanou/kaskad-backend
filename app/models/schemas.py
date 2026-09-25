@@ -12,6 +12,15 @@ class EmailPassword(BaseModel):
     password: str = Field(min_length=1, max_length=256)
 
 
+class RegisterIn(EmailPassword):
+    # Nom affiché avec les avis de l'utilisateur
+    name: str = Field(default="", max_length=40)
+
+
+class UserUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+
+
 class AnonymousLogin(BaseModel):
     device_id: str = Field(min_length=8, max_length=128)
 
@@ -23,6 +32,7 @@ class RefreshIn(BaseModel):
 class UserOut(BaseModel):
     id: str
     email: str | None = None
+    name: str | None = None
     anonymous: bool
 
 
@@ -117,6 +127,17 @@ class CategoryReassign(BaseModel):
 
 
 # ---------- Applications
+Lang = Literal["fr", "en"]
+Channel = Literal["production", "beta"]
+
+
+class ListingTranslation(BaseModel):
+    """Textes de la fiche dans une autre langue que la langue principale de l'app."""
+
+    short_description: str = Field(default="", max_length=200)
+    long_description: str = Field(default="", max_length=20000)
+
+
 class AppIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     short_description: str = Field(default="", max_length=200)
@@ -125,6 +146,8 @@ class AppIn(BaseModel):
     target_platforms: list[Platform] = Field(default_factory=list)
     featured: bool = False
     android_package: str | None = Field(default=None, max_length=255)
+    default_language: Lang = "fr"
+    translations: dict[Lang, ListingTranslation] = Field(default_factory=dict)
 
 
 class AppUpdate(BaseModel):
@@ -135,6 +158,14 @@ class AppUpdate(BaseModel):
     target_platforms: list[Platform] | None = None
     featured: bool | None = None
     android_package: str | None = Field(default=None, max_length=255)
+    default_language: Lang | None = None
+    translations: dict[Lang, ListingTranslation] | None = None
+
+
+class TestersIn(BaseModel):
+    """Testeurs du canal bêta : adresses e-mail des comptes utilisateurs de l'app client."""
+
+    emails: list[EmailStr] = Field(default_factory=list, max_length=500)
 
 
 class AppStatusIn(BaseModel):
@@ -148,6 +179,14 @@ class ScreenshotsOrder(BaseModel):
 # ---------- Circuit de validation
 class ReviewSubmit(BaseModel):
     note: str = Field(default="", max_length=2000)
+    # Date de mise en ligne souhaitée (publication programmée après validation)
+    publish_at: datetime | None = None
+
+
+class PublishIn(BaseModel):
+    """Publication par l'administrateur : immédiate, ou programmée à `publish_at`."""
+
+    publish_at: datetime | None = None
 
 
 class ReviewReject(BaseModel):
@@ -162,4 +201,6 @@ class StatusRequestIn(BaseModel):
 # ---------- Versions
 class VersionUpdate(BaseModel):
     changelog: str | None = Field(default=None, max_length=20000)
+    changelog_translations: dict[Lang, str] | None = None
+    channel: Channel | None = None
     version_name: str | None = Field(default=None, min_length=1, max_length=50)

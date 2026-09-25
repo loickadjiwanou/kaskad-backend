@@ -78,6 +78,24 @@ MESSAGES: dict[str, dict[str, str]] = {
         "fr": "Votre rôle (lecteur) permet uniquement la consultation.",
         "en": "Your role (viewer) only allows viewing.",
     },
+    "developer_not_found": {"fr": "Développeur introuvable.", "en": "Developer not found."},
+    "account_suspended": {
+        "fr": "Ce compte développeur est suspendu. Contactez l'administrateur de la plateforme.",
+        "en": "This developer account is suspended. Please contact the platform administrator.",
+    },
+    "version_locked": {
+        "fr": "Le canal ne peut plus être modifié : la version est déjà programmée ou en ligne.",
+        "en": "The channel can no longer be changed: the version is already scheduled or live.",
+    },
+    "invalid_api_key": {"fr": "Clé API invalide ou révoquée.", "en": "Invalid or revoked API key."},
+    "not_enough_testers": {
+        "fr": "Ajoutez au moins {min} testeurs à l'app avant de soumettre ou de publier une version bêta.",
+        "en": "Add at least {min} testers to the app before submitting or publishing a beta version.",
+    },
+    "email_account_required": {
+        "fr": "Créez un compte avec une adresse e-mail pour publier un avis.",
+        "en": "Create an account with an email address to post a review.",
+    },
     "invalid_image": {"fr": "Image invalide (PNG, JPEG ou WebP).", "en": "Invalid image (PNG, JPEG or WebP)."},
 }
 
@@ -96,5 +114,10 @@ class ApiError(HTTPException):
         self.extra = extra
 
 
-def message(code: str, lang: str) -> str:
-    return MESSAGES.get(code, {}).get(lang) or MESSAGES.get(code, {}).get("en") or code
+def message(code: str, lang: str, **params) -> str:
+    """Message localisé ; `params` complète les variables du message (ex. `{min}`)."""
+    text = MESSAGES.get(code, {}).get(lang) or MESSAGES.get(code, {}).get("en") or code
+    try:
+        return text.format(**params) if params else text
+    except (KeyError, IndexError, ValueError):
+        return text

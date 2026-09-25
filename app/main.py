@@ -11,11 +11,12 @@ from app.core.config import get_settings
 from app.core.i18n import ApiError, language, message
 from app.core.ratelimit import LoginRateLimiter
 from app.db import close_client, ensure_indexes, get_db
-from app.routers import admin_apps, admin_auth, admin_categories, admin_stats, admin_versions, public, users
+from app.routers import admin_apps, admin_auth, admin_categories, admin_stats, admin_versions, public, reviews, users, web
 from app.services import accounts
 from app.services.cleanup import cleanup_loop
 from app.services.mailer import Mailer
 from app.services.notifications import PushService
+from app.services.releases import scheduler_loop
 from app.services.scanning import ScanQueue
 from app.services.storage import create_storage
 
@@ -40,15 +41,19 @@ async def lifespan(app: FastAPI):
     app.state.login_limiter = LoginRateLimiter(settings.login_max_attempts, settings.login_window_minutes * 60)
     # Inscriptions, renvois d'e-mail, invitations : limités par adresse IP
     app.state.signup_limiter = LoginRateLimiter(5, 60 * 60, max_per_ip=20)
-    app.state.scan_queue = ScanQueue(db, storage, settings)
+    app.state.scan_queue = ScanQueue(db, storage, settings, app.state.mailer)
     await app.state.scan_queue.start()
     cleanup_task = asyncio.create_task(cleanup_loop(db, storage, settings)) if settings.environment != "test" else None
+    # Publications programmées (les tests appellent directement releases.publish_due)
+    scheduler_task = asyncio.create_task(scheduler_loop(db, app.state.push, app.state.mailer)) if settings.environment != "test" else None
     try:
         yield
     finally:
         await app.state.scan_queue.stop()
         if cleanup_task:
             cleanup_task.cancel()
+        if scheduler_task:
+            scheduler_task.cancel()
         await close_client()
 
 
@@ -75,7 +80,7 @@ def create_app() -> FastAPI:
         # `detail` : message lisible dans la langue du client ; `code` : identifiant stable
         return JSONResponse(
             status_code=exc.status_code,
-            content={"detail": message(exc.code, language(request)), "code": exc.code, **exc.extra},
+            content={"detail": message(exc.code, language(request), **exc.extra), "code": exc.code, **exc.extra},
         )
 
     @app.exception_handler(RequestValidationError)
@@ -97,8 +102,11 @@ def create_app() -> FastAPI:
         admin_apps.router,
         admin_versions.router,
         admin_stats.router,
+        reviews.router,
     ):
         app.include_router(router, prefix=settings.api_prefix)
+    # Pages web publiques des apps (liens partagés), hors préfixe de l'API
+    app.include_router(web.router)
     return app
 
 

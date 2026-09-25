@@ -52,6 +52,7 @@ async def app(mongo_uri, monkeypatch):
     application = create_app()
     async with LifespanManager(application):
         application.state.mailer = FakeMailer()  # e-mails capturés (jamais envoyés à Brevo)
+        application.state.scan_queue.mailer = application.state.mailer
         yield application
     get_settings.cache_clear()
 

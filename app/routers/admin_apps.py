@@ -5,16 +5,18 @@ import re
 import secrets
 from urllib.parse import unquote
 
-from fastapi import APIRouter, File, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Query, Request, UploadFile
 
 from app.core.config import get_settings
-from app.core.i18n import ApiError
-from app.deps import CurrentAdmin, Db, Publisher, StorageDep, Writer
+from app.core.i18n import ApiError, language
+from app.deps import CurrentAdmin, Db, MailerDep, Publisher, StorageDep, Writer
 from app.models.common import AppStatus, maybe_oid, now, oid
-from app.models.schemas import AppIn, AppStatusIn, AppUpdate, ReviewReject, ReviewSubmit, ScreenshotsOrder, StatusRequestIn
+from app.models.schemas import AppIn, AppStatusIn, AppUpdate, ReviewReject, ReviewSubmit, ScreenshotsOrder, StatusRequestIn, TestersIn
 from app.services.accounts import account_scope, is_platform_admin
 from app.services.activity import log_activity
 from app.services.catalog import PUBLIC_VERSION_FILTER, app_admin, app_detail
+from app.services.emails import tester_email
+from app.services.notify import notify_member, review_requested
 from app.services.review import (
     LISTING_FIELDS,
     decision,
@@ -103,6 +105,7 @@ async def create_app(db: Db, admin: Writer, body: AppIn):
         **body.model_dump(exclude={"category_ids"}),
         "category_ids": await _category_ids(db, body.category_ids),
         "account_id": admin["account_id"],
+        "account_name": (await db.accounts.find_one({"_id": admin["account_id"]}, {"name": 1}) or {}).get("name"),
         "status": "draft",
         "icon_key": None,
         "screenshot_keys": [],
@@ -183,7 +186,7 @@ async def set_status(db: Db, admin: Publisher, app_id: str, body: AppStatusIn):
 
 
 @router.post("/{app_id}/status-request")
-async def request_status(db: Db, admin: Writer, app_id: str, body: StatusRequestIn):
+async def request_status(db: Db, background: BackgroundTasks, mailer: MailerDep, admin: Writer, app_id: str, body: StatusRequestIn):
     """Demande de changement de statut (publier / dépublier / brouillon), à valider par un admin complet."""
     app = await get_app_or_404(db, app_id, admin)
     if body.status == app.get("status"):
@@ -193,20 +196,31 @@ async def request_status(db: Db, admin: Writer, app_id: str, body: StatusRequest
     request = submission(admin, body.note, status=body.status)
     await db.apps.update_one({"_id": app["_id"]}, {"$set": {"status_request": request}})
     await log_activity(db, admin, "app.status_requested", "app", app["_id"], {"name": app["name"], "status": body.status})
+    background.add_task(review_requested, db, mailer, admin, app, "status", status=body.status, note=body.note or None)
     return app_admin(await db.apps.find_one({"_id": app["_id"]}))
 
 
 @router.post("/{app_id}/status-request/approve")
-async def approve_status_request(db: Db, admin: Publisher, app_id: str):
+async def approve_status_request(db: Db, background: BackgroundTasks, mailer: MailerDep, admin: Publisher, app_id: str):
     app = await get_app_or_404(db, app_id, admin)
     request = app.get("status_request")
     if not is_pending(request):
         raise ApiError(409, "review_not_pending")
+    background.add_task(
+        notify_member,
+        db,
+        mailer,
+        request.get("submitted_by"),
+        "status_approved",
+        f"/apps/{app['_id']}",
+        app=app["name"],
+        status=request["status"],
+    )
     return await _apply_status(db, admin, app, request["status"], requested_by=request.get("submitted_by_name"))
 
 
 @router.post("/{app_id}/status-request/reject")
-async def reject_status_request(db: Db, admin: Publisher, app_id: str, body: ReviewReject):
+async def reject_status_request(db: Db, background: BackgroundTasks, mailer: MailerDep, admin: Publisher, app_id: str, body: ReviewReject):
     app = await get_app_or_404(db, app_id, admin)
     request = app.get("status_request")
     if not is_pending(request):
@@ -219,6 +233,17 @@ async def reject_status_request(db: Db, admin: Publisher, app_id: str, body: Rev
         "app",
         app["_id"],
         {"name": app["name"], "status": request["status"], "reason": body.reason},
+    )
+    background.add_task(
+        notify_member,
+        db,
+        mailer,
+        request.get("submitted_by"),
+        "status_rejected",
+        f"/apps/{app['_id']}",
+        app=app["name"],
+        status=request["status"],
+        reason=body.reason,
     )
     return app_admin(await db.apps.find_one({"_id": app["_id"]}))
 
@@ -238,11 +263,35 @@ async def withdraw_status_request(db: Db, admin: Writer, app_id: str):
     return app_admin(await db.apps.find_one({"_id": app["_id"]}))
 
 
+@router.put("/{app_id}/testers")
+async def set_testers(
+    db: Db, request: Request, background: BackgroundTasks, mailer: MailerDep, admin: Writer, app_id: str, body: TestersIn
+):
+    """Testeurs du canal bêta : adresses e-mail des comptes de l'app client qui voient les versions bêta.
+
+    Chaque nouveau testeur reçoit un e-mail (langue de la console) expliquant comment accéder aux versions bêta.
+    """
+    app = await get_app_or_404(db, app_id, admin)
+    emails = sorted({e.lower() for e in body.emails})
+    added = sorted(set(emails) - {e.lower() for e in app.get("testers") or []})
+    await db.apps.update_one({"_id": app["_id"]}, {"$set": {"testers": emails, "updated_at": now()}})
+    await log_activity(
+        db, admin, "app.testers_updated", "app", app["_id"], {"name": app["name"], "count": len(emails), "added": len(added)}
+    )
+    s = get_settings()
+    lang = language(request)
+    url = f"{s.app_link_base}{app['_id']}"
+    account = app.get("account_name") or ""
+    for email in added:
+        background.add_task(mailer.send, tester_email(lang, email, app["name"], account, url))
+    return app_admin(await db.apps.find_one({"_id": app["_id"]}))
+
+
 # ---------------------------------------------------------------- brouillon de fiche
 
 
 @router.post("/{app_id}/listing/submit")
-async def submit_listing(db: Db, admin: Writer, app_id: str, body: ReviewSubmit):
+async def submit_listing(db: Db, background: BackgroundTasks, mailer: MailerDep, admin: Writer, app_id: str, body: ReviewSubmit):
     """Soumet les modifications de fiche (brouillon) à la validation d'un admin complet."""
     app = await get_app_or_404(db, app_id, admin)
     if not app.get("listing_draft"):
@@ -251,11 +300,12 @@ async def submit_listing(db: Db, admin: Writer, app_id: str, body: ReviewSubmit)
         raise ApiError(409, "already_submitted")
     await db.apps.update_one({"_id": app["_id"]}, {"$set": {"listing_review": submission(admin, body.note)}})
     await log_activity(db, admin, "app.listing_submitted", "app", app["_id"], {"name": app["name"]})
+    background.add_task(review_requested, db, mailer, admin, app, "listing", note=body.note or None)
     return app_admin(await db.apps.find_one({"_id": app["_id"]}))
 
 
 @router.post("/{app_id}/listing/publish")
-async def publish_listing(db: Db, storage: StorageDep, admin: Publisher, app_id: str):
+async def publish_listing(db: Db, background: BackgroundTasks, mailer: MailerDep, storage: StorageDep, admin: Publisher, app_id: str):
     """Met en ligne le brouillon de fiche (validation d'une demande, ou publication directe par un admin complet)."""
     app = await get_app_or_404(db, app_id, admin)
     draft = app.get("listing_draft")
@@ -273,18 +323,31 @@ async def publish_listing(db: Db, storage: StorageDep, admin: Publisher, app_id:
     details = {"name": live.get("name") or app["name"]}
     if is_pending(review):
         details["requested_by"] = review.get("submitted_by_name")
+        background.add_task(
+            notify_member, db, mailer, review.get("submitted_by"), "listing_published", f"/apps/{app['_id']}", app=details["name"]
+        )
     await log_activity(db, admin, "app.listing_published", "app", app["_id"], details)
     return app_admin(updated)
 
 
 @router.post("/{app_id}/listing/reject")
-async def reject_listing(db: Db, admin: Publisher, app_id: str, body: ReviewReject):
+async def reject_listing(db: Db, background: BackgroundTasks, mailer: MailerDep, admin: Publisher, app_id: str, body: ReviewReject):
     app = await get_app_or_404(db, app_id, admin)
     review = app.get("listing_review")
     if not is_pending(review):
         raise ApiError(409, "review_not_pending")
     await db.apps.update_one({"_id": app["_id"]}, {"$set": {"listing_review": {**review, **decision(admin, "rejected", body.reason)}}})
     await log_activity(db, admin, "app.listing_rejected", "app", app["_id"], {"name": app["name"], "reason": body.reason})
+    background.add_task(
+        notify_member,
+        db,
+        mailer,
+        review.get("submitted_by"),
+        "listing_rejected",
+        f"/apps/{app['_id']}",
+        app=app["name"],
+        reason=body.reason,
+    )
     return app_admin(await db.apps.find_one({"_id": app["_id"]}))
 
 

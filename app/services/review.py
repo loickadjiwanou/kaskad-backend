@@ -21,6 +21,8 @@ LISTING_FIELDS = (
     "android_package",
     "icon_key",
     "screenshot_keys",
+    "default_language",
+    "translations",
 )
 
 
@@ -86,6 +88,8 @@ def listing_out(draft: dict | None) -> dict | None:
         "target_platforms": draft.get("target_platforms") or [],
         "featured": bool(draft.get("featured")),
         "android_package": draft.get("android_package"),
+        "default_language": draft.get("default_language") or "fr",
+        "translations": draft.get("translations") or {},
         "icon_url": media_url(draft.get("icon_key")),
         "screenshots": [media_url(k) for k in draft.get("screenshot_keys") or []],
         "updated_at": draft.get("updated_at"),

@@ -3,19 +3,25 @@
 from fastapi import APIRouter, Request
 from pymongo.errors import DuplicateKeyError
 
-from app.core.i18n import ApiError
+from app.core.i18n import ApiError, language
 from app.core.security import hash_password, verify_password
 from app.deps import CurrentUser, Db, LoginLimiter, OptionalUser
 from app.models.common import maybe_oid, now, sid
-from app.models.schemas import AnonymousLogin, EmailPassword, LibraryIn, PushTokenIn, RefreshIn, UserSession
+from app.models.schemas import AnonymousLogin, EmailPassword, LibraryIn, PushTokenIn, RefreshIn, RegisterIn, UserSession, UserUpdate
 from app.services.auth import issue_tokens, revoke_all, revoke_refresh_token, rotate_refresh_token
-from app.services.catalog import PUBLIC_VERSION_FILTER, app_summary, version_public
+from app.services.catalog import PUBLIC_APP_FILTER, PUBLIC_VERSION_FILTER, app_summary, version_public
+from app.services.ratings import refresh_rating
 
 router = APIRouter(tags=["users"])
 
 
+def display_name(u: dict) -> str:
+    """Nom public du compte (avis) : nom choisi, sinon la partie de l'e-mail avant @."""
+    return (u.get("name") or "").strip() or (u.get("email") or "").split("@")[0]
+
+
 def user_out(u: dict) -> dict:
-    return {"id": sid(u["_id"]), "email": u.get("email"), "anonymous": bool(u.get("anonymous"))}
+    return {"id": sid(u["_id"]), "email": u.get("email"), "name": u.get("name") or None, "anonymous": bool(u.get("anonymous"))}
 
 
 async def _session(db, user: dict) -> dict:
@@ -23,7 +29,7 @@ async def _session(db, user: dict) -> dict:
 
 
 @router.post("/auth/register", response_model=UserSession)
-async def register(db: Db, request: Request, limiter: LoginLimiter, body: EmailPassword, current: OptionalUser):
+async def register(db: Db, request: Request, limiter: LoginLimiter, body: RegisterIn, current: OptionalUser):
     """Crée un compte email. Si l'appelant est connecté en anonyme, son compte est converti (bibliothèque conservée)."""
     limiter.check(request, f"register:{body.email}")
     if len(body.password) < 8:
@@ -32,6 +38,8 @@ async def register(db: Db, request: Request, limiter: LoginLimiter, body: EmailP
     if await db.users.find_one({"email": email}):
         raise ApiError(409, "email_taken")
     fields = {"email": email, "password_hash": hash_password(body.password), "anonymous": False, "updated_at": now()}
+    if body.name.strip():
+        fields["name"] = body.name.strip()
     try:
         if current and current.get("anonymous"):
             # L'identifiant d'appareil est détaché : une future connexion anonyme créera un nouveau compte
@@ -95,20 +103,40 @@ async def me(user: CurrentUser):
     return user_out(user)
 
 
+@router.patch("/me")
+async def update_me(db: Db, user: CurrentUser, body: UserUpdate):
+    """Nom du compte e-mail ; il est repris sur tous les avis de l'utilisateur."""
+    if user.get("anonymous"):
+        raise ApiError(403, "email_account_required")
+    name = body.name.strip()
+    await db.users.update_one({"_id": user["_id"]}, {"$set": {"name": name, "updated_at": now()}})
+    await db.reviews.update_many({"user_id": user["_id"]}, {"$set": {"author_name": name}})
+    return user_out({**user, "name": name})
+
+
 @router.delete("/me", status_code=204)
 async def delete_account(db: Db, user: CurrentUser):
-    """Suppression définitive du compte et de ses données (bibliothèque, jetons push, sessions)."""
+    """Suppression définitive du compte et de ses données (bibliothèque, jetons push, sessions, avis)."""
     await revoke_all(db, user["_id"])
+    app_ids = await db.reviews.distinct("app_id", {"user_id": user["_id"]})
+    await db.reviews.delete_many({"user_id": user["_id"]})
+    for app_id in app_ids:
+        await refresh_rating(db, app_id)
     await db.users.delete_one({"_id": user["_id"]})
 
 
-async def _my_apps(db, user: dict) -> list[dict]:
+async def _my_apps(db, user: dict, lang: str | None = None) -> list[dict]:
     followed = {f["app_id"]: f.get("notify", True) for f in user.get("followed_apps", [])}
     installed = {i["app_id"]: i.get("version_id") for i in user.get("installed_apps", [])}
     app_ids = list(dict.fromkeys([*installed, *followed]))
-    apps = {a["_id"]: a for a in await db.apps.find({"_id": {"$in": app_ids}, "status": "published"}).to_list(None)}
+    apps = {a["_id"]: a for a in await db.apps.find({"_id": {"$in": app_ids}, **PUBLIC_APP_FILTER}).to_list(None)}
     installed_versions = {v["_id"]: v for v in await db.versions.find({"_id": {"$in": [v for v in installed.values() if v]}}).to_list(None)}
-    public = await db.versions.find({"app_id": {"$in": list(apps)}, **PUBLIC_VERSION_FILTER}).sort("version_code", -1).to_list(None)
+    # Dernière version de production (les versions bêta ne déclenchent pas d'alerte de mise à jour)
+    public = (
+        await db.versions.find({"app_id": {"$in": list(apps)}, **PUBLIC_VERSION_FILTER, "channel": {"$ne": "beta"}})
+        .sort("version_code", -1)
+        .to_list(None)
+    )
 
     items = []
     for app_id in app_ids:
@@ -120,11 +148,11 @@ async def _my_apps(db, user: dict) -> list[dict]:
         latest = next((v for v in public if v["app_id"] == app_id and (not platform or v["platform"] == platform)), None)
         items.append(
             {
-                "app": app_summary(app),
+                "app": app_summary(app, lang),
                 "followed": app_id in followed,
                 "notify": followed.get(app_id, False),
-                "installed_version": version_public(current) if current else None,
-                "latest_version": version_public(latest) if latest else None,
+                "installed_version": version_public(current, lang) if current else None,
+                "latest_version": version_public(latest, lang) if latest else None,
                 "update_available": bool(current and latest and latest["version_code"] > current["version_code"]),
             }
         )
@@ -132,15 +160,15 @@ async def _my_apps(db, user: dict) -> list[dict]:
 
 
 @router.get("/me/apps")
-async def my_apps(db: Db, user: CurrentUser):
+async def my_apps(db: Db, request: Request, user: CurrentUser):
     """Apps suivies et installées du compte, avec la dernière version disponible (même plateforme que la version installée)."""
-    return await _my_apps(db, user)
+    return await _my_apps(db, user, language(request))
 
 
 @router.get("/me/updates")
-async def my_updates(db: Db, user: CurrentUser):
+async def my_updates(db: Db, request: Request, user: CurrentUser):
     """Uniquement les apps installées pour lesquelles une nouvelle version est disponible."""
-    return [i for i in await _my_apps(db, user) if i["update_available"]]
+    return [i for i in await _my_apps(db, user, language(request)) if i["update_available"]]
 
 
 def library_out(u: dict) -> dict:

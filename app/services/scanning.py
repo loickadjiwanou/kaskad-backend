@@ -12,7 +12,7 @@ from anyio import to_thread
 from bson import ObjectId
 from pymongo.asynchronous.database import AsyncDatabase
 
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.models.common import now
 from app.services.activity import log_system
 from app.services.scanners import clamav, static, virustotal
@@ -168,11 +168,50 @@ async def scan_version(db: AsyncDatabase, storage: Storage, settings: Settings, 
     return status
 
 
+async def auto_submit(db: AsyncDatabase, mailer, version_id: ObjectId) -> bool:
+    """Version envoyée avec `submit=true` (clé API / intégration continue) : soumise à validation dès l'analyse validée."""
+    from app.services.notify import review_requested
+    from app.services.review import submission
+
+    v = await db.versions.find_one({"_id": version_id, "status": "draft", "auto_submit": {"$ne": None}})
+    if not v or not v.get("auto_submit"):
+        return False
+    request = v["auto_submit"]
+    app = await db.apps.find_one({"_id": v["app_id"]})
+    minimum = get_settings().min_beta_testers
+    if v.get("channel") == "beta" and len(app.get("testers") or []) < minimum:
+        await db.versions.update_one({"_id": version_id}, {"$set": {"auto_submit": None, "updated_at": now()}})
+        await log_system(
+            db,
+            "version.submit_blocked",
+            "version",
+            version_id,
+            {"app": app["name"], "version": v["version_name"], "reason": "not_enough_testers", "min": minimum},
+            account_id=app.get("account_id"),
+        )
+        return False
+    author = {"_id": request.get("by"), "name": request.get("by_name"), "role": "developer"}
+    review = submission(author, request.get("note") or "", kind="publish", publish_at=request.get("publish_at"))
+    await db.versions.update_one({"_id": version_id}, {"$set": {"review": review, "auto_submit": None, "updated_at": now()}})
+    await log_system(
+        db,
+        "version.submitted",
+        "version",
+        version_id,
+        {"app": app["name"], "version": v["version_name"], "automatic": True, "requested_by": request.get("by_name")},
+        account_id=app.get("account_id"),
+    )
+    if mailer is not None:
+        await review_requested(db, mailer, author, app, "version", version=v["version_name"], note=request.get("note") or None)
+    return True
+
+
 class ScanQueue:
     """File d'analyse en tâche de fond (un seul worker : les analyses sont coûteuses)."""
 
-    def __init__(self, db: AsyncDatabase, storage: Storage, settings: Settings):
+    def __init__(self, db: AsyncDatabase, storage: Storage, settings: Settings, mailer=None):
         self.db, self.storage, self.settings = db, storage, settings
+        self.mailer = mailer  # e-mail « à valider » des soumissions automatiques
         self.queue: asyncio.Queue[ObjectId] = asyncio.Queue()
         self.task: asyncio.Task | None = None
 
@@ -203,7 +242,9 @@ class ScanQueue:
         while True:
             version_id = await self.queue.get()
             try:
-                await scan_version(self.db, self.storage, self.settings, version_id)
+                status = await scan_version(self.db, self.storage, self.settings, version_id)
+                if status == "passed":
+                    await auto_submit(self.db, self.mailer, version_id)
             except Exception:
                 log.exception("scan worker error")
             finally:

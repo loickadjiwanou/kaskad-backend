@@ -9,7 +9,7 @@ import secrets
 from datetime import timedelta
 from typing import Literal
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Query, Request
 from pydantic import BaseModel, EmailStr, Field
 from pymongo.errors import DuplicateKeyError
 
@@ -28,8 +28,10 @@ from app.services.accounts import (
     is_platform_admin,
 )
 from app.services.activity import log_activity
+from app.services.api_keys import api_key_out, new_api_key
 from app.services.auth import issue_tokens, revoke_all, revoke_refresh_token, rotate_refresh_token
-from app.services.emails import invitation_email, verification_email
+from app.services.emails import invitation_email, reset_password_email, verification_email
+from app.services.notify import notify_member
 
 router = APIRouter(prefix="/admin", tags=["admin: auth & team"])
 
@@ -63,6 +65,21 @@ def _hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+async def _ensure_account_active(db, admin: dict) -> None:
+    """Membres d'un compte développeur suspendu : connexion refusée (jamais l'administrateur de la plateforme)."""
+    if admin.get("role") == PLATFORM_ADMIN or not admin.get("account_id"):
+        return
+    if await db.accounts.find_one({"_id": admin["account_id"], "suspended": True}, {"_id": 1}):
+        raise ApiError(403, "account_suspended")
+
+
+async def _remember_language(db, admin: dict, request: Request) -> None:
+    """Langue de la console du membre : utilisée pour les e-mails de suivi qui lui sont envoyés."""
+    lang = language(request)
+    if admin.get("language") != lang:
+        await db.admins.update_one({"_id": admin["_id"]}, {"$set": {"language": lang}})
+
+
 def _limit(request: Request, key: str) -> None:
     request.app.state.signup_limiter.check(request, key)
 
@@ -85,7 +102,9 @@ async def login(db: Db, request: Request, limiter: LoginLimiter, body: EmailPass
         raise ApiError(403, "account_disabled")
     if not admin.get("email_verified", True):
         raise ApiError(403, "email_not_verified")
+    await _ensure_account_active(db, admin)
     limiter.reset(request, f"admin:{body.email}")
+    await _remember_language(db, admin, request)
     return await _session(db, admin)
 
 
@@ -193,11 +212,64 @@ async def verify_email(db: Db, body: TokenIn):
     return await _session(db, admin)
 
 
+# ---------------------------------------------------------------- mot de passe oublié
+
+
+@router.post("/auth/forgot-password", status_code=202)
+async def forgot_password(db: Db, request: Request, mailer: MailerDep, body: EmailIn):
+    """Envoie un lien de réinitialisation (langue de la console). Réponse identique que l'adresse existe ou non."""
+    _limit(request, f"reset:{body.email}")
+    admin = await db.admins.find_one({"email": body.email.lower(), "active": {"$ne": False}})
+    if admin:
+        s = get_settings()
+        token, token_hash = _new_token()
+        await db.email_tokens.delete_many({"admin_id": admin["_id"], "kind": "reset"})
+        await db.email_tokens.insert_one(
+            {
+                "admin_id": admin["_id"],
+                "kind": "reset",
+                "token_hash": token_hash,
+                "expires_at": now() + timedelta(minutes=s.password_reset_ttl_minutes),
+                "created_at": now(),
+            }
+        )
+        url = f"{s.console_url.rstrip('/')}/reset-password?token={token}"
+        email = reset_password_email(language(request), admin["email"], admin.get("name") or "", url, s.password_reset_ttl_minutes)
+        await mailer.send(email)
+    return {"detail": "ok"}
+
+
+class ResetIn(BaseModel):
+    token: str = Field(min_length=10, max_length=200)
+    password: str = Field(min_length=8, max_length=256)
+
+
+@router.post("/auth/reset-password", response_model=AdminSession)
+async def reset_password(db: Db, request: Request, body: ResetIn):
+    """Nouveau mot de passe depuis le lien reçu : les autres sessions sont révoquées, une nouvelle session est ouverte."""
+    stored = await db.email_tokens.find_one_and_delete({"token_hash": _hash(body.token), "kind": "reset"})
+    if not stored or stored["expires_at"].replace(tzinfo=None) < now().replace(tzinfo=None):
+        raise ApiError(400, "token_invalid")
+    admin = await db.admins.find_one({"_id": stored["admin_id"]})
+    if not admin or not admin.get("active", True):
+        raise ApiError(403, "account_disabled")
+    await _ensure_account_active(db, admin)
+    # Le lien reçu prouve aussi la possession de l'adresse e-mail
+    await db.admins.update_one(
+        {"_id": admin["_id"]}, {"$set": {"password_hash": hash_password(body.password), "email_verified": True, "updated_at": now()}}
+    )
+    await revoke_all(db, admin["_id"])
+    await log_activity(db, admin, "member.password_reset", "admin", admin["_id"])
+    await _remember_language(db, admin, request)
+    return await _session(db, await db.admins.find_one({"_id": admin["_id"]}))
+
+
 # ---------------------------------------------------------------- profil et compte
 
 
 @router.get("/auth/me")
-async def me(db: Db, admin: CurrentAdmin):
+async def me(db: Db, request: Request, admin: CurrentAdmin):
+    await _remember_language(db, admin, request)
     return admin_out(admin, await _account(db, admin))
 
 
@@ -229,6 +301,7 @@ class AccountUpdate(BaseModel):
 async def rename_account(db: Db, admin: TeamManager, body: AccountUpdate):
     """Renomme le compte développeur (propriétaire)."""
     await db.accounts.update_one({"_id": admin["account_id"]}, {"$set": {"name": body.name.strip(), "updated_at": now()}})
+    await db.apps.update_many({"account_id": admin["account_id"]}, {"$set": {"account_name": body.name.strip()}})
     await log_activity(db, admin, "account.renamed", "account", admin["account_id"], {"name": body.name})
     return account_out(await _account(db, admin))
 
@@ -252,9 +325,108 @@ async def list_accounts(db: Db, _: FullAdmin):
             "members_count": members.get(acc["_id"], 0),
             "apps_count": apps.get(acc["_id"], 0),
             "platform": owners.get(acc.get("owner_id"), {}).get("role") == PLATFORM_ADMIN,
+            "suspended": bool(acc.get("suspended")),
+            "suspended_at": acc.get("suspended_at"),
+            "suspension_reason": acc.get("suspension_reason"),
         }
         for acc in accounts
     ]
+
+
+class AccountSuspension(BaseModel):
+    suspended: bool
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+@router.patch("/accounts/{account_id}")
+async def suspend_account(
+    db: Db, background: BackgroundTasks, mailer: MailerDep, admin: FullAdmin, account_id: str, body: AccountSuspension
+):
+    """Administrateur de la plateforme : suspend (ou réactive) un compte développeur entier.
+
+    Suspendu : ses apps disparaissent du store, ses membres sont déconnectés et ne peuvent plus se connecter.
+    Le propriétaire est prévenu par e-mail.
+    """
+    account = await db.accounts.find_one({"_id": oid(account_id, "not_found")})
+    if not account:
+        raise ApiError(404, "not_found")
+    if account["_id"] == admin.get("account_id"):
+        raise ApiError(403, "cannot_edit_member")  # compte de la plateforme
+    reason = (body.reason or "").strip() or None
+    update = {
+        "suspended": body.suspended,
+        "suspended_at": now() if body.suspended else None,
+        "suspension_reason": reason if body.suspended else None,
+    }
+    await db.accounts.update_one({"_id": account["_id"]}, {"$set": {**update, "updated_at": now()}})
+    await db.apps.update_many({"account_id": account["_id"]}, {"$set": {"account_suspended": body.suspended}})
+    if body.suspended:
+        async for member in db.admins.find({"account_id": account["_id"]}, {"_id": 1}):
+            await revoke_all(db, member["_id"])
+    await log_activity(
+        db,
+        admin,
+        "account.suspended" if body.suspended else "account.reactivated",
+        "account",
+        account["_id"],
+        {"name": account["name"], "reason": reason},
+        account_id=account["_id"],
+    )
+    background.add_task(
+        notify_member,
+        db,
+        mailer,
+        account.get("owner_id"),
+        "account_suspended" if body.suspended else "account_reactivated",
+        "/",
+        account=account["name"],
+        reason=reason if body.suspended else None,
+    )
+    return {**account_out({**account, **update}), **update}
+
+
+# ---------------------------------------------------------------- clés API (intégration continue)
+
+
+class ApiKeyIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+@router.get("/api-keys")
+async def list_api_keys(db: Db, admin: TeamManager):
+    keys = await db.api_keys.find({"account_id": admin["account_id"], "revoked_at": None}).sort("created_at", -1).to_list(None)
+    return [api_key_out(k) for k in keys]
+
+
+@router.post("/api-keys", status_code=201)
+async def create_api_key(db: Db, admin: TeamManager, body: ApiKeyIn):
+    """Crée une clé API pour le compte. La clé complète n'est renvoyée qu'une fois (seule son empreinte est stockée)."""
+    if admin.get("api_key"):
+        raise ApiError(403, "forbidden")
+    key, key_hash = new_api_key()
+    doc = {
+        "account_id": admin["account_id"],
+        "name": body.name.strip(),
+        "prefix": key[:12],
+        "key_hash": key_hash,
+        "created_by": admin["_id"],
+        "created_by_name": admin.get("name"),
+        "created_at": now(),
+        "last_used_at": None,
+        "revoked_at": None,
+    }
+    doc["_id"] = (await db.api_keys.insert_one(doc)).inserted_id
+    await log_activity(db, admin, "api_key.created", "api_key", doc["_id"], {"name": doc["name"], "prefix": doc["prefix"]})
+    return {**api_key_out(doc), "key": key}
+
+
+@router.delete("/api-keys/{key_id}", status_code=204)
+async def revoke_api_key(db: Db, admin: TeamManager, key_id: str):
+    key = await db.api_keys.find_one({"_id": oid(key_id, "not_found"), "account_id": admin["account_id"], "revoked_at": None})
+    if not key:
+        raise ApiError(404, "not_found")
+    await db.api_keys.update_one({"_id": key["_id"]}, {"$set": {"revoked_at": now()}})
+    await log_activity(db, admin, "api_key.revoked", "api_key", key["_id"], {"name": key["name"], "prefix": key["prefix"]})
 
 
 # ---------------------------------------------------------------- membres
@@ -432,6 +604,8 @@ class AcceptIn(BaseModel):
 async def accept_invitation(db: Db, request: Request, body: AcceptIn):
     """Crée le compte du membre invité (adresse confirmée par le lien) et ouvre une session."""
     inv = await _valid_invitation(db, body.token)
+    if await db.accounts.find_one({"_id": inv["account_id"], "suspended": True}, {"_id": 1}):
+        raise ApiError(403, "account_suspended")
     if await db.admins.find_one({"email": inv["email"]}):
         raise ApiError(409, "already_member")
     doc = {

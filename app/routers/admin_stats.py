@@ -40,7 +40,7 @@ async def overview(db: Db, admin: CurrentAdmin):
         {"upload_status": "stored", "status": "draft", "security_scan_status": {"$in": ["pending", "scanning", "passed"]}, **in_apps}
     )
     reviews_pending = (
-        await db.versions.count_documents({"review.state": "pending", "status": "draft", **in_apps})
+        await db.versions.count_documents({"review.state": "pending", "status": {"$in": ["draft", "published"]}, **in_apps})
         + await db.apps.count_documents({"status_request.state": "pending", **scope})
         + await db.apps.count_documents({"listing_review.state": "pending", **scope})
     )
@@ -66,6 +66,9 @@ async def overview(db: Db, admin: CurrentAdmin):
         "versions_pending_review": pending_review,
         # Demandes des éditeurs en attente de validation par un admin complet
         "reviews_pending": reviews_pending,
+        # Modération des utilisateurs (administrateur) : apps signalées, avis signalés
+        "reports_open": await db.app_reports.count_documents({"status": "open", **scope}) if is_platform_admin(admin) else 0,
+        "user_reviews_reported": await db.reviews.count_documents({"reports.0": {"$exists": True}}) if is_platform_admin(admin) else 0,
         "recent_publications": [
             {
                 "version_id": sid(v["_id"]),
@@ -182,7 +185,11 @@ async def moderation_queue(db: Db, admin: FullAdmin):
     """Administrateur de la plateforme — versions en attente : analyse en cours, rejetées, ou validées mais pas encore publiées."""
     ids = await scoped_app_ids(db, admin)
     in_apps = {} if ids is None else {"app_id": {"$in": ids}}
-    versions = await db.versions.find({"upload_status": "stored", "status": "draft", **in_apps}).sort("created_at", -1).to_list(None)
+    versions = (
+        await db.versions.find({"upload_status": "stored", "status": {"$in": ["draft", "scheduled"]}, **in_apps})
+        .sort("created_at", -1)
+        .to_list(None)
+    )
     apps = {
         a["_id"]: a["name"] for a in await db.apps.find({"_id": {"$in": list({v["app_id"] for v in versions})}}, {"name": 1}).to_list(None)
     }
@@ -196,7 +203,11 @@ async def moderation_reviews(db: Db, admin: FullAdmin):
     scope = account_scope(admin)
     ids = await scoped_app_ids(db, admin)
     in_apps = {} if ids is None else {"app_id": {"$in": ids}}
-    versions = await db.versions.find({"review.state": states, "status": "draft", **in_apps}).sort("review.submitted_at", -1).to_list(None)
+    versions = (
+        await db.versions.find({"review.state": states, "status": {"$in": ["draft", "published"]}, **in_apps})
+        .sort("review.submitted_at", -1)
+        .to_list(None)
+    )
     names = {
         a["_id"]: (a["name"], a.get("status"))
         for a in await db.apps.find({"_id": {"$in": list({v["app_id"] for v in versions})}}, {"name": 1, "status": 1}).to_list(None)

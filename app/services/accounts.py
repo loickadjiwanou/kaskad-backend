@@ -110,6 +110,11 @@ async def bootstrap(db: AsyncDatabase) -> None:
     # Contenus existants → compte de la plateforme
     await db.apps.update_many({"account_id": {"$exists": False}}, {"$set": {"account_id": account_id}})
     await db.activity_log.update_many({"account_id": {"$exists": False}}, {"$set": {"account_id": account_id}})
+    # Nom et état du compte recopiés sur les apps (catalogue public : nom du développeur, apps masquées si suspendu)
+    async for acc in db.accounts.find({}, {"name": 1, "suspended": 1}):
+        await db.apps.update_many(
+            {"account_id": acc["_id"]}, {"$set": {"account_name": acc["name"], "account_suspended": bool(acc.get("suspended"))}}
+        )
 
 
 async def platform_account_id(db: AsyncDatabase):

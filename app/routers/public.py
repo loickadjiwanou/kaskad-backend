@@ -7,11 +7,21 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from pymongo.collation import Collation
 
-from app.core.i18n import ApiError
-from app.deps import Db, StorageDep
+from app.core.i18n import ApiError, language
+from app.deps import Db, OptionalUser, StorageDep
 from app.models.common import Platform, maybe_oid, oid
 from app.models.schemas import UpdatesCheckIn
-from app.services.catalog import PUBLIC_VERSION_FILTER, app_detail, app_summary, category_out, version_public
+from app.services.catalog import (
+    PUBLIC_APP_FILTER,
+    PUBLIC_VERSION_FILTER,
+    app_detail,
+    app_summary,
+    category_out,
+    channel_filter,
+    is_tester,
+    verify_beta_token,
+    version_public,
+)
 from app.services.stats import record_download
 from app.services.storage import LocalStorage
 
@@ -39,21 +49,22 @@ def _compatible_first(apps: list[dict], platform: str | None) -> list[dict]:
 
 
 @router.get("/home")
-async def home(db: Db, platform: Platform | None = None):
+async def home(db: Db, request: Request, platform: Platform | None = None):
     """Accueil : apps en vedette, nouveautés, populaires. `platform` place les apps compatibles en premier (sans filtrer)."""
-    published = {"status": "published"}
+    published = PUBLIC_APP_FILTER
     featured = await db.apps.find({**published, "featured": True}).sort("downloads_count", -1).to_list(20)
     recent = await db.apps.find(published).sort([("last_published_at", -1), ("created_at", -1)]).to_list(12)
     popular = await db.apps.find(published).sort("downloads_count", -1).to_list(12)
+    lang = language(request)
     return {
-        "featured": [app_summary(a) for a in _compatible_first(featured, platform)],
-        "new": [app_summary(a) for a in _compatible_first(recent, platform)[:8]],
-        "popular": [app_summary(a) for a in _compatible_first(popular, platform)[:8]],
+        "featured": [app_summary(a, lang) for a in _compatible_first(featured, platform)],
+        "new": [app_summary(a, lang) for a in _compatible_first(recent, platform)[:8]],
+        "popular": [app_summary(a, lang) for a in _compatible_first(popular, platform)[:8]],
     }
 
 
 def _search_filter(q: str | None, category_id: str | None, platform: str | None) -> dict:
-    flt: dict = {"status": "published"}
+    flt: dict = dict(PUBLIC_APP_FILTER)
     if category_id:
         flt["category_ids"] = maybe_oid(category_id)
     if platform:
@@ -71,6 +82,7 @@ def _search_filter(q: str | None, category_id: str | None, platform: str | None)
 @router.get("/apps")
 async def list_apps(
     db: Db,
+    request: Request,
     q: str | None = Query(default=None, max_length=100),
     category_id: str | None = None,
     platform: Platform | None = None,
@@ -78,8 +90,11 @@ async def list_apps(
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=20, ge=1, le=100),
     ids: str | None = Query(default=None, description="Identifiants séparés par des virgules (récupération groupée)"),
+    developer_id: str | None = Query(default=None, description="Apps d'un compte développeur"),
 ):
     flt = _search_filter(q, category_id, platform)
+    if developer_id:
+        flt["account_id"] = maybe_oid(developer_id)
     if ids:
         flt["_id"] = {"$in": [o for o in (maybe_oid(i.strip()) for i in ids.split(",")[:100]) if o]}
     order = {
@@ -92,7 +107,8 @@ async def list_apps(
         cursor = cursor.collation(Collation(locale="fr", strength=1))
     items = await cursor.to_list(None)
     total = await db.apps.count_documents(flt)
-    return {"items": [app_summary(a) for a in items], "total": total, "page": page, "limit": limit}
+    lang = language(request)
+    return {"items": [app_summary(a, lang) for a in items], "total": total, "page": page, "limit": limit}
 
 
 # La recherche partage les mêmes paramètres que la liste
@@ -100,32 +116,47 @@ router.add_api_route("/search", list_apps, methods=["GET"], tags=["public"])
 
 
 async def _published_app(db, app_id: str) -> dict:
-    app = await db.apps.find_one({"_id": oid(app_id, "app_not_found"), "status": "published"})
+    app = await db.apps.find_one({"_id": oid(app_id, "app_not_found"), **PUBLIC_APP_FILTER})
     if not app:
         raise ApiError(404, "app_not_found")
     return app
 
 
 @router.get("/apps/{app_id}")
-async def get_app(db: Db, app_id: str):
+async def get_app(db: Db, request: Request, user: OptionalUser, app_id: str):
+    """Fiche dans la langue de l'app client ; les testeurs (utilisateur connecté) voient aussi les versions bêta."""
     app = await _published_app(db, app_id)
     categories = await db.categories.find({"_id": {"$in": app.get("category_ids", [])}}).sort("order", 1).to_list(None)
-    versions = await db.versions.find({"app_id": app["_id"], **PUBLIC_VERSION_FILTER}).sort("version_code", -1).to_list(None)
-    return app_detail(app, categories, versions)
+    flt = {"app_id": app["_id"], **PUBLIC_VERSION_FILTER, **channel_filter(app, user)}
+    versions = await db.versions.find(flt).sort("version_code", -1).to_list(None)
+    return {**app_detail(app, categories, versions, language(request)), "is_tester": is_tester(app, user)}
+
+
+@router.get("/developers/{developer_id}")
+async def get_developer(db: Db, developer_id: str):
+    """Compte développeur public : nom et nombre d'apps publiées (liste : GET /apps?developer_id=)."""
+    account = await db.accounts.find_one({"_id": oid(developer_id, "developer_not_found"), "suspended": {"$ne": True}})
+    if not account:
+        raise ApiError(404, "developer_not_found")
+    count = await db.apps.count_documents({"account_id": account["_id"], **PUBLIC_APP_FILTER})
+    return {"id": developer_id, "name": account["name"], "apps_count": count}
 
 
 @router.get("/apps/{app_id}/versions")
-async def get_app_versions(db: Db, app_id: str, platform: Platform | None = None):
+async def get_app_versions(db: Db, request: Request, user: OptionalUser, app_id: str, platform: Platform | None = None):
     app = await _published_app(db, app_id)
-    flt = {"app_id": app["_id"], **PUBLIC_VERSION_FILTER}
+    flt = {"app_id": app["_id"], **PUBLIC_VERSION_FILTER, **channel_filter(app, user)}
     if platform:
         flt["platform"] = platform
     versions = await db.versions.find(flt).sort("version_code", -1).to_list(None)
-    return [version_public(v) for v in versions]
+    lang = language(request)
+    return [version_public(v, lang) for v in versions]
 
 
 @router.get("/versions/{version_id}/download")
-async def download_version(request: Request, db: Db, storage: StorageDep, version_id: str, platform: Platform | None = None):
+async def download_version(
+    request: Request, db: Db, storage: StorageDep, version_id: str, platform: Platform | None = None, t: str | None = None
+):
     """Compte le téléchargement puis redirige vers une URL signée temporaire. N'installe jamais rien.
 
     Une reprise de téléchargement (en-tête Range qui ne commence pas à 0) n'est pas comptée une seconde fois.
@@ -133,7 +164,10 @@ async def download_version(request: Request, db: Db, storage: StorageDep, versio
     version = await db.versions.find_one({"_id": oid(version_id, "version_not_found"), **PUBLIC_VERSION_FILTER})
     if not version:
         raise ApiError(404, "version_unavailable")
-    app = await db.apps.find_one({"_id": version["app_id"], "status": "published"})
+    # Version bêta : lien signé remis aux seuls testeurs (champ `file_url` de leurs fiches)
+    if version.get("channel") == "beta" and not verify_beta_token(version["_id"], t):
+        raise ApiError(404, "version_unavailable")
+    app = await db.apps.find_one({"_id": version["app_id"], **PUBLIC_APP_FILTER})
     if not app:
         raise ApiError(404, "version_unavailable")
     if not _is_resume(request.headers.get("range")):
@@ -148,22 +182,23 @@ def _is_resume(range_header: str | None) -> bool:
 
 
 @router.post("/updates/check")
-async def check_updates(db: Db, body: UpdatesCheckIn):
+async def check_updates(db: Db, request: Request, user: OptionalUser, body: UpdatesCheckIn):
     """Pour chaque app installée, renvoie la dernière version publiée plus récente (même plateforme si précisée)."""
     ids = {maybe_oid(i.app_id) for i in body.installed} - {None}
     if not ids:
         return []
-    published_apps = {a["_id"] for a in await db.apps.find({"_id": {"$in": list(ids)}, "status": "published"}, {"_id": 1}).to_list(None)}
-    versions = (
-        await db.versions.find({"app_id": {"$in": list(published_apps)}, **PUBLIC_VERSION_FILTER}).sort("version_code", -1).to_list(None)
-    )
+    apps = {a["_id"]: a for a in await db.apps.find({"_id": {"$in": list(ids)}, **PUBLIC_APP_FILTER}, {"testers": 1}).to_list(None)}
+    candidates_all = await db.versions.find({"app_id": {"$in": list(apps)}, **PUBLIC_VERSION_FILTER}).sort("version_code", -1).to_list(None)
+    # Bêta : proposée uniquement aux testeurs de l'app
+    versions = [v for v in candidates_all if v.get("channel") != "beta" or is_tester(apps[v["app_id"]], user)]
+    lang = language(request)
     results = []
     for item in body.installed:
         app_id = maybe_oid(item.app_id)
         candidates = [v for v in versions if v["app_id"] == app_id and (not item.platform or v["platform"] == item.platform)]
         latest = candidates[0] if candidates else None
         if latest and latest["version_code"] > item.version_code:
-            results.append({"app_id": item.app_id, "latest_version": version_public(latest)})
+            results.append({"app_id": item.app_id, "latest_version": version_public(latest, lang)})
     return results
 
 
