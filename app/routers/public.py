@@ -14,10 +14,13 @@ from app.models.schemas import UpdatesCheckIn, ViewIn
 from app.services.catalog import (
     PUBLIC_APP_FILTER,
     PUBLIC_VERSION_FILTER,
+    REACHABLE_APP_FILTER,
     app_detail,
     app_summary,
+    can_see_app,
     category_out,
     channel_filter,
+    in_testing,
     is_tester,
     verify_beta_token,
     version_public,
@@ -125,12 +128,19 @@ async def _published_app(db, app_id: str) -> dict:
 
 @router.get("/apps/{app_id}")
 async def get_app(db: Db, request: Request, user: OptionalUser, app_id: str):
-    """Fiche dans la langue de l'app client ; les testeurs (utilisateur connecté) voient aussi les versions bêta."""
-    app = await _published_app(db, app_id)
+    """Fiche dans la langue de l'app client ; les testeurs (utilisateur connecté) voient aussi les versions bêta.
+
+    Test fermé : une app pas encore publiée n'est visible que par ses testeurs, avec ses versions bêta
+    (`in_testing: true`) ; pour tous les autres, elle n'existe pas (404).
+    """
+    app = await db.apps.find_one({"_id": oid(app_id, "app_not_found"), **REACHABLE_APP_FILTER})
+    if not can_see_app(app, user):
+        raise ApiError(404, "app_not_found")
     categories = await db.categories.find({"_id": {"$in": app.get("category_ids", [])}}).sort("order", 1).to_list(None)
     flt = {"app_id": app["_id"], **PUBLIC_VERSION_FILTER, **channel_filter(app, user)}
     versions = await db.versions.find(flt).sort("version_code", -1).to_list(None)
-    return {**app_detail(app, categories, versions, language(request)), "is_tester": is_tester(app, user)}
+    detail = app_detail(app, categories, versions, language(request))
+    return {**detail, "is_tester": is_tester(app, user), "in_testing": in_testing(app)}
 
 
 @router.get("/developers/{developer_id}")
@@ -168,8 +178,9 @@ async def download_version(
     # Version bêta : lien signé remis aux seuls testeurs (champ `file_url` de leurs fiches)
     if version.get("channel") == "beta" and not verify_beta_token(version["_id"], t):
         raise ApiError(404, "version_unavailable")
-    app = await db.apps.find_one({"_id": version["app_id"], **PUBLIC_APP_FILTER})
-    if not app:
+    app = await db.apps.find_one({"_id": version["app_id"], **REACHABLE_APP_FILTER})
+    # App en test fermé : seules ses versions bêta (lien signé des testeurs, vérifié ci-dessus) sont téléchargeables
+    if not app or (in_testing(app) and version.get("channel") != "beta"):
         raise ApiError(404, "version_unavailable")
     if not _is_resume(request.headers.get("range")):
         await record_download(db, app["_id"], version, platform, country_for(request))
@@ -205,10 +216,20 @@ async def check_updates(db: Db, request: Request, user: OptionalUser, body: Upda
     ids = {maybe_oid(i.app_id) for i in body.installed} - {None}
     if not ids:
         return []
-    apps = {a["_id"]: a for a in await db.apps.find({"_id": {"$in": list(ids)}, **PUBLIC_APP_FILTER}, {"testers": 1}).to_list(None)}
+    # Apps publiées, et apps en test fermé pour leurs testeurs
+    apps = {
+        a["_id"]: a
+        for a in await db.apps.find({"_id": {"$in": list(ids)}, **REACHABLE_APP_FILTER}, {"testers": 1, "status": 1}).to_list(None)
+        if can_see_app(a, user)
+    }
     candidates_all = await db.versions.find({"app_id": {"$in": list(apps)}, **PUBLIC_VERSION_FILTER}).sort("version_code", -1).to_list(None)
     # Bêta : proposée uniquement aux testeurs de l'app
-    versions = [v for v in candidates_all if v.get("channel") != "beta" or is_tester(apps[v["app_id"]], user)]
+    versions = [
+        v
+        for v in candidates_all
+        if (v.get("channel") == "beta" and is_tester(apps[v["app_id"]], user))
+        or (v.get("channel") != "beta" and not in_testing(apps[v["app_id"]]))
+    ]
     # Versions réellement installées (statistiques), par appareil
     if body.device_id:
         await record_installations(

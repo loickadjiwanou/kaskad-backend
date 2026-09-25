@@ -71,18 +71,27 @@ async def test_review_notification_emails(app, client, admin_headers):
 
     await client.patch(f"{API}/admin/versions/{v['id']}", json={"changelog": "• Fixes"}, headers=dev)
     await client.post(f"{API}/admin/versions/{v['id']}/submit", json={}, headers=dev)
+    # L'administrateur est averti que l'app n'est pas encore publiée
+    assert "pas encore publiée" in mails_to(app, "admin@example.com")[-1].text
     await client.post(f"{API}/admin/versions/{v['id']}/publish", headers=admin_headers)
-    assert mails_to(app, "dev@example.com")[-1].subject.startswith("Version published: Nova Notes 1.0.0")
+    # App pas encore publiée : la version est validée mais PAS « disponible au téléchargement »
+    mail = mails_to(app, "dev@example.com")[-1]
+    assert mail.subject.startswith("Version approved: Nova Notes 1.0.0")
+    assert "can't be downloaded yet" in mail.text and "Request publishing" in mail.text and "available for download" not in mail.text
 
-    # Demande de statut : approuvée → e-mail à son auteur
+    # Demande de publication de l'app : approuvée → l'app est visible dans le store, avec sa version
     await client.post(f"{API}/admin/apps/{a['id']}/status-request", json={"status": "published"}, headers=dev)
     assert mails_to(app, "admin@example.com")[-1].subject.startswith("À valider")
     await client.post(f"{API}/admin/apps/{a['id']}/status-request/approve", headers=admin_headers)
-    assert mails_to(app, "dev@example.com")[-1].subject.startswith("Request approved: Nova Notes")
-    # Les actions de l'administrateur lui-même ne génèrent pas d'e-mail « à valider »
+    mail = mails_to(app, "dev@example.com")[-1]
+    assert mail.subject.startswith("App published: Nova Notes")
+    assert "approved by the platform admin" in mail.text and "visible in the Kaskad store" in mail.text and "can be downloaded" in mail.text
+    # Dépublication directe par l'administrateur : le propriétaire du compte est prévenu, pas l'administrateur
     before = len(mails_to(app, "admin@example.com"))
     await client.post(f"{API}/admin/apps/{a['id']}/status", json={"status": "archived"}, headers=admin_headers)
     assert len(mails_to(app, "admin@example.com")) == before
+    mail = mails_to(app, "owner@example.com")[-1]
+    assert mail.subject.startswith("Application dépubliée : Nova Notes") and "décision a été prise par l'administrateur" in mail.text
 
 
 async def test_developer_shown_on_public_listing(app, client, admin_headers):

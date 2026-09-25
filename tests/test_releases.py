@@ -134,7 +134,7 @@ async def test_scheduled_publication(app, client, admin_headers):
     await db.versions.update_one({"_id": ObjectId(v["id"])}, {"$set": {"scheduled_at": datetime.now(UTC) - timedelta(minutes=1)}})
     assert await publish_due(db, None, app.state.mailer) == 1
     assert (await client.get(f"{API}/apps/{a['id']}")).json()["versions"][0]["version_name"] == "1.0.0"
-    assert mails_to(app, "owner@example.com")[-1].subject.startswith(("Version publiée", "Version published"))
+    assert mails_to(app, "owner@example.com")[-1].subject.startswith(("Version disponible", "Version available"))
 
     # Annulation d'une programmation : retour en brouillon
     v2 = (await upload(client, owner, a["id"], code=200, name="2.0.0")).json()
@@ -186,3 +186,66 @@ async def test_api_keys_for_continuous_integration(app, client, admin_headers):
     await client.delete(f"{API}/admin/api-keys/{listed[0]['id']}", headers=owner)
     r = await client.get(f"{API}/admin/apps", headers=ci)
     assert r.status_code == 401 and r.json()["code"] == "invalid_api_key"
+
+
+async def test_closed_testing_before_public_launch(app, client, admin_headers):
+    """Comme un test fermé Google Play : app pas encore publiée, visible et téléchargeable par ses seuls testeurs (bêta)."""
+    owner = await signup(client, app)
+    a = await create_app(client, owner, name="Nova Notes")  # brouillon : jamais publiée
+    await client.put(
+        f"{API}/admin/apps/{a['id']}/testers",
+        json={"emails": ["tester@example.com", "t2@example.com", "t3@example.com"]},
+        headers={**owner, "Accept-Language": "fr"},
+    )
+    invite = mails_to(app, "tester@example.com")[-1]
+    assert "même avant le lancement public" in invite.text
+    prod = (await upload(client, owner, a["id"], code=100, name="1.0.0")).json()
+    files = {"file": ("app.deb", b"!<arch>\n" + b"debian-binary   " + b"7" * 2000, "application/octet-stream")}
+    data = {"version_name": "1.1.0-beta.1", "version_code": "110", "platform": "linux", "file_format": "deb", "channel": "beta"}
+    beta = (await client.post(f"{API}/admin/apps/{a['id']}/versions", data=data, files=files, headers=owner)).json()
+    await wait_scans(app)
+    for v in (prod, beta):
+        await client.post(f"{API}/admin/versions/{v['id']}/submit", json={}, headers=owner)
+        await client.post(f"{API}/admin/versions/{v['id']}/publish", headers=admin_headers)
+    # Le développeur sait que la bêta est déjà installable par ses testeurs
+    mail = mails_to(app, "owner@example.com")[-1]
+    assert mail.subject.startswith("Version bêta disponible") and "même si l'application n'est pas encore publiée" in mail.text
+
+    async def session(email):
+        r = await client.post(f"{API}/auth/register", json={"email": email, "password": "user-pass-123"})
+        return bearer(r.json())
+
+    tester = await session("tester@example.com")
+    stranger = await session("someone@example.com")
+    # Invisible pour tout le monde sauf les testeurs, et jamais listée dans le store
+    assert (await client.get(f"{API}/apps/{a['id']}")).status_code == 404
+    assert (await client.get(f"{API}/apps/{a['id']}", headers=stranger)).status_code == 404
+    assert (await client.get(f"{API}/apps", headers=tester)).json()["total"] == 0
+    detail = (await client.get(f"{API}/apps/{a['id']}", headers=tester)).json()
+    assert detail["in_testing"] is True and detail["is_tester"] is True
+    # Seule la bêta est proposée (la version de production attend le lancement public)
+    assert [v["version_name"] for v in detail["versions"]] == ["1.1.0-beta.1"]
+    r = await client.get(detail["versions"][0]["file_url"].replace("http://test", ""), follow_redirects=False)
+    assert r.status_code in (302, 307)
+    r = await client.get(f"{API}/versions/{prod['id']}/download", follow_redirects=False)
+    assert r.status_code == 404
+    # Mises à jour : la bêta pour le testeur, rien pour les autres ; « Mes apps » du testeur
+    check = {"installed": [{"app_id": a["id"], "version_id": beta["id"], "version_code": 100, "platform": "linux"}]}
+    assert (await client.post(f"{API}/updates/check", json=check, headers=tester)).json()[0]["latest_version"][
+        "version_name"
+    ] == "1.1.0-beta.1"
+    assert (await client.post(f"{API}/updates/check", json=check, headers=stranger)).json() == []
+    await client.put(f"{API}/me/library", json={"installed_apps": [{"app_id": a["id"], "version_id": beta["id"]}]}, headers=tester)
+    mine = (await client.get(f"{API}/me/apps", headers=tester)).json()
+    assert mine[0]["app"]["name"] == "Nova Notes" and mine[0]["latest_version"]["version_name"] == "1.1.0-beta.1"
+    # Avis et page web publique : pas pendant le test
+    assert (await client.get(f"{API}/apps/{a['id']}/reviews", headers=tester)).status_code == 404
+    assert (await client.get(f"/a/{a['id']}")).status_code == 404
+
+    # Lancement public : la version de production devient visible par tous
+    await client.post(f"{API}/admin/apps/{a['id']}/status", json={"status": "published"}, headers=admin_headers)
+    public = (await client.get(f"{API}/apps/{a['id']}")).json()
+    assert public["in_testing"] is False and [v["version_name"] for v in public["versions"]] == ["1.0.0"]
+    # Dépubliée (retirée du store) : plus accessible, même aux testeurs
+    await client.post(f"{API}/admin/apps/{a['id']}/status", json={"status": "archived"}, headers=admin_headers)
+    assert (await client.get(f"{API}/apps/{a['id']}", headers=tester)).status_code == 404

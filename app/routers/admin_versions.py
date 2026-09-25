@@ -19,7 +19,7 @@ from app.models.schemas import Channel, PublishIn, ReviewReject, ReviewSubmit, V
 from app.routers.admin_apps import get_app_or_404
 from app.services.activity import log_activity
 from app.services.catalog import refresh_app_catalog_fields, version_admin
-from app.services.notify import notify_member, review_requested
+from app.services.notify import app_live, notify_about_app, review_requested
 from app.services.releases import go_live, is_beta
 from app.services.review import decision, is_full_admin, is_pending, submission
 
@@ -268,13 +268,14 @@ async def reject_version(db: Db, background: BackgroundTasks, mailer: MailerDep,
     )
     # L'auteur de la soumission est prévenu, avec le motif
     background.add_task(
-        notify_member,
+        notify_about_app,
         db,
         mailer,
         v["review"].get("submitted_by"),
+        app,
         "version_rejected",
         f"/apps/{app['_id']}?tab=versions",
-        app=app["name"],
+        skip_id=admin["_id"],
         version=v["version_name"],
         reason=body.reason,
     )
@@ -337,24 +338,26 @@ async def publish_version(
             v["_id"],
             {"app": app["name"], "version": v["version_name"], "publish_at": publish_at},
         )
-        if is_pending(review):
-            background.add_task(
-                notify_member,
-                db,
-                mailer,
-                review.get("submitted_by"),
-                "version_scheduled",
-                f"/apps/{app['_id']}?tab=versions",
-                app=app["name"],
-                version=v["version_name"],
-                date=publish_at,
-            )
+        # Auteur de la demande, ou personne qui a envoyé la version (programmation directe)
+        background.add_task(
+            notify_about_app,
+            db,
+            mailer,
+            review.get("submitted_by") if is_pending(review) else v.get("created_by"),
+            app,
+            "version_scheduled" if app_live(app) else "version_scheduled_hidden",
+            f"/apps/{app['_id']}?tab=versions",
+            skip_id=admin["_id"],
+            version=v["version_name"],
+            date=publish_at,
+            lead=None if is_pending(review) else "direct",
+        )
         return version_admin(await db.versions.find_one({"_id": v["_id"]}))
     if approved is not review:
         await db.versions.update_one({"_id": v["_id"]}, {"$set": {"review": approved}})
-    # L'auteur n'est prévenu qu'en cas de validation d'une demande
+    # Demande validée : son auteur est prévenu ; publication directe : la personne qui a envoyé la version
     to_notify = {**v, "review": review if is_pending(review) else None}
-    return version_admin(await go_live(db, push, mailer, to_notify, admin, background))
+    return version_admin(await go_live(db, push, mailer, to_notify, admin, background, direct=not is_pending(review)))
 
 
 @router.post("/versions/{version_id}/unschedule")

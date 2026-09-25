@@ -36,6 +36,14 @@ def category_out(c: dict) -> dict:
 
 # Apps visibles dans l'app client : publiées, et dont le compte développeur n'est pas suspendu
 PUBLIC_APP_FILTER = {"status": "published", "account_suspended": {"$ne": True}}
+# Test fermé (comme Google Play) : une app pas encore publiée (brouillon) est accessible à ses seuls testeurs,
+# uniquement pour ses versions bêta. Jamais listée dans le store (accueil, recherche, catégories).
+REACHABLE_APP_FILTER = {"status": {"$in": ["published", "draft"]}, "account_suspended": {"$ne": True}}
+
+
+def in_testing(app: dict) -> bool:
+    """App en test fermé : pas encore publiée, compte non suspendu."""
+    return app.get("status") == "draft" and not app.get("account_suspended")
 
 
 def developer_out(a: dict) -> dict | None:
@@ -93,8 +101,18 @@ def is_tester(app: dict, user: dict | None) -> bool:
 
 
 def channel_filter(app: dict, user: dict | None) -> dict:
-    """Versions visibles par cet utilisateur : production pour tous, bêta en plus pour les testeurs."""
+    """Versions visibles par cet utilisateur : production pour tous, bêta en plus pour les testeurs ;
+    app en test fermé : versions bêta uniquement (et seulement pour ses testeurs)."""
+    if in_testing(app):
+        return {"channel": "beta"}
     return {} if is_tester(app, user) else {"channel": {"$ne": "beta"}}
+
+
+def can_see_app(app: dict | None, user: dict | None) -> bool:
+    """App publiée (tout le monde) ou en test fermé (ses testeurs seulement)."""
+    if not app or app.get("account_suspended"):
+        return False
+    return app.get("status") == "published" or (in_testing(app) and is_tester(app, user))
 
 
 def app_summary(a: dict, lang: str | None = None) -> dict:

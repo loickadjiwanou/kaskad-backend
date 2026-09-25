@@ -10,13 +10,12 @@
 import asyncio
 import logging
 
-from bson import ObjectId
 from pymongo.asynchronous.database import AsyncDatabase
 
 from app.models.common import now
 from app.services.activity import log_activity, log_system
 from app.services.catalog import refresh_app_catalog_fields
-from app.services.notify import notify_member
+from app.services.notify import notify_about_app, version_live_kind
 
 log = logging.getLogger("kaskad.releases")
 
@@ -36,11 +35,13 @@ async def _run(background, fn, *args, **kwargs) -> None:
         await fn(*args, **kwargs)
 
 
-async def go_live(db: AsyncDatabase, push, mailer, version: dict, actor: dict | None, background=None) -> dict:
+async def go_live(db: AsyncDatabase, push, mailer, version: dict, actor: dict | None, background=None, direct: bool = False) -> dict:
     """Met la version en ligne (ou fait passer une bêta en ligne en production).
 
-    `actor` : administrateur qui publie (None : planificateur). Prévient l'auteur de la soumission par e-mail
-    et, pour une version de production, les utilisateurs qui suivent l'app (notification push).
+    `actor` : administrateur qui publie (None : planificateur). `direct` : publication sans demande préalable.
+    Prévient par e-mail l'auteur de la soumission (sinon la personne qui a envoyé la version), avec un texte
+    qui dépend de la visibilité de l'app (« disponible » seulement si l'app est publiée), et, pour une version
+    de production d'une app visible, les utilisateurs qui suivent l'app (notification push).
     """
     promote = version.get("status") == "published" and is_beta(version)
     update: dict = {"updated_at": now(), "scheduled_at": None}
@@ -63,18 +64,20 @@ async def go_live(db: AsyncDatabase, push, mailer, version: dict, actor: dict | 
     else:
         await log_system(db, action, "version", v["_id"], {**details, "scheduled": True}, account_id=app.get("account_id"))
 
-    # Auteur de la demande (soumission validée ou programmée)
-    if isinstance(review.get("submitted_by"), ObjectId) and mailer is not None:
+    # Auteur de la demande (ou de l'envoi de la version) ; jamais l'administrateur qui vient de publier
+    if mailer is not None:
         await _run(
             background,
-            notify_member,
+            notify_about_app,
             db,
             mailer,
-            review["submitted_by"],
-            "version_published",
+            review.get("submitted_by") or v.get("created_by"),
+            app,
+            version_live_kind(app, v, promoted=promote),
             f"/apps/{app['_id']}?tab=versions",
-            app=app["name"],
+            skip_id=actor["_id"] if actor else None,
             version=v["version_name"],
+            lead="direct" if direct else None,
         )
 
     # Notification push : version de production la plus récente de sa plateforme, app visible

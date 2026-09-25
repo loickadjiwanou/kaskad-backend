@@ -16,7 +16,7 @@ from app.services.accounts import account_scope, is_platform_admin
 from app.services.activity import log_activity
 from app.services.catalog import PUBLIC_VERSION_FILTER, app_admin, app_detail
 from app.services.emails import tester_email
-from app.services.notify import notify_member, review_requested
+from app.services.notify import notify_about_app, review_requested
 from app.services.review import (
     LISTING_FIELDS,
     decision,
@@ -169,20 +169,42 @@ async def update_app(db: Db, admin: Writer, app_id: str, body: AppUpdate):
     return app_admin(updated)
 
 
-async def _apply_status(db, admin: dict, app: dict, status: str, requested_by: str | None = None) -> dict:
+def status_kind(app: dict) -> str:
+    """E-mail du nouveau statut : publiée (avec ou sans version téléchargeable), dépubliée, brouillon."""
+    if app["status"] == "published":
+        return "app_published" if app.get("latest_version_name") else "app_published_empty"
+    return f"app_{app['status']}"
+
+
+async def _apply_status(db, admin: dict, app: dict, status: str, background=None, mailer=None, request: dict | None = None) -> dict:
+    """Change le statut de l'app et prévient le compte développeur : l'auteur de la demande approuvée,
+    ou le propriétaire du compte pour une décision directe de l'administrateur (jamais l'auteur de l'action)."""
     await db.apps.update_one({"_id": app["_id"]}, {"$set": {"status": status, "updated_at": now()}, "$unset": {"status_request": ""}})
     details = {"from": app.get("status"), "name": app["name"]}
-    if requested_by:
-        details["requested_by"] = requested_by
+    if request and request.get("submitted_by_name"):
+        details["requested_by"] = request["submitted_by_name"]
     await log_activity(db, admin, f"app.{status}", "app", app["_id"], details)
-    return app_admin(await db.apps.find_one({"_id": app["_id"]}))
+    updated = await db.apps.find_one({"_id": app["_id"]})
+    if background is not None and mailer is not None and status != app.get("status"):
+        background.add_task(
+            notify_about_app,
+            db,
+            mailer,
+            request.get("submitted_by") if request else None,
+            updated,
+            status_kind(updated),
+            f"/apps/{app['_id']}",
+            skip_id=admin["_id"],
+            lead="approved" if request else "direct",
+        )
+    return app_admin(updated)
 
 
 @router.post("/{app_id}/status")
-async def set_status(db: Db, admin: Publisher, app_id: str, body: AppStatusIn):
+async def set_status(db: Db, background: BackgroundTasks, mailer: MailerDep, admin: Publisher, app_id: str, body: AppStatusIn):
     """Brouillon / publié / archivé (dépublié), réservé aux admins complets. Les apps ne sont jamais supprimées physiquement."""
     app = await get_app_or_404(db, app_id, admin)
-    return await _apply_status(db, admin, app, body.status)
+    return await _apply_status(db, admin, app, body.status, background, mailer)
 
 
 @router.post("/{app_id}/status-request")
@@ -206,17 +228,7 @@ async def approve_status_request(db: Db, background: BackgroundTasks, mailer: Ma
     request = app.get("status_request")
     if not is_pending(request):
         raise ApiError(409, "review_not_pending")
-    background.add_task(
-        notify_member,
-        db,
-        mailer,
-        request.get("submitted_by"),
-        "status_approved",
-        f"/apps/{app['_id']}",
-        app=app["name"],
-        status=request["status"],
-    )
-    return await _apply_status(db, admin, app, request["status"], requested_by=request.get("submitted_by_name"))
+    return await _apply_status(db, admin, app, request["status"], background, mailer, request=request)
 
 
 @router.post("/{app_id}/status-request/reject")
@@ -235,13 +247,14 @@ async def reject_status_request(db: Db, background: BackgroundTasks, mailer: Mai
         {"name": app["name"], "status": request["status"], "reason": body.reason},
     )
     background.add_task(
-        notify_member,
+        notify_about_app,
         db,
         mailer,
         request.get("submitted_by"),
+        app,
         "status_rejected",
         f"/apps/{app['_id']}",
-        app=app["name"],
+        skip_id=admin["_id"],
         status=request["status"],
         reason=body.reason,
     )
@@ -323,9 +336,18 @@ async def publish_listing(db: Db, background: BackgroundTasks, mailer: MailerDep
     details = {"name": live.get("name") or app["name"]}
     if is_pending(review):
         details["requested_by"] = review.get("submitted_by_name")
-        background.add_task(
-            notify_member, db, mailer, review.get("submitted_by"), "listing_published", f"/apps/{app['_id']}", app=details["name"]
-        )
+    # Auteur de la demande validée, ou propriétaire du compte si l'administrateur publie directement
+    background.add_task(
+        notify_about_app,
+        db,
+        mailer,
+        review.get("submitted_by") if is_pending(review) else None,
+        updated,
+        "listing_published",
+        f"/apps/{app['_id']}",
+        skip_id=admin["_id"],
+        lead=None if is_pending(review) else "direct",
+    )
     await log_activity(db, admin, "app.listing_published", "app", app["_id"], details)
     return app_admin(updated)
 
@@ -339,13 +361,14 @@ async def reject_listing(db: Db, background: BackgroundTasks, mailer: MailerDep,
     await db.apps.update_one({"_id": app["_id"]}, {"$set": {"listing_review": {**review, **decision(admin, "rejected", body.reason)}}})
     await log_activity(db, admin, "app.listing_rejected", "app", app["_id"], {"name": app["name"], "reason": body.reason})
     background.add_task(
-        notify_member,
+        notify_about_app,
         db,
         mailer,
         review.get("submitted_by"),
+        app,
         "listing_rejected",
         f"/apps/{app['_id']}",
-        app=app["name"],
+        skip_id=admin["_id"],
         reason=body.reason,
     )
     return app_admin(await db.apps.find_one({"_id": app["_id"]}))

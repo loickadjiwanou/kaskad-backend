@@ -168,6 +168,27 @@ async def scan_version(db: AsyncDatabase, storage: Storage, settings: Settings, 
     return status
 
 
+async def notify_scan_failed(db: AsyncDatabase, mailer, version_id: ObjectId) -> None:
+    """Version refusée par l'analyse : la personne qui l'a envoyée (ou le propriétaire, pour une clé API) est prévenue."""
+    from app.services.notify import notify_about_app
+
+    v = await db.versions.find_one({"_id": version_id})
+    app = await db.apps.find_one({"_id": v["app_id"]}) if v else None
+    if not v or not app or mailer is None:
+        return
+    errors = (v.get("scan_report") or {}).get("errors") or []
+    await notify_about_app(
+        db,
+        mailer,
+        v.get("created_by"),
+        app,
+        "version_scan_rejected",
+        f"/apps/{app['_id']}?tab=versions",
+        version=v["version_name"],
+        error=errors[0] if errors else None,
+    )
+
+
 async def auto_submit(db: AsyncDatabase, mailer, version_id: ObjectId) -> bool:
     """Version envoyée avec `submit=true` (clé API / intégration continue) : soumise à validation dès l'analyse validée."""
     from app.services.notify import review_requested
@@ -189,6 +210,19 @@ async def auto_submit(db: AsyncDatabase, mailer, version_id: ObjectId) -> bool:
             {"app": app["name"], "version": v["version_name"], "reason": "not_enough_testers", "min": minimum},
             account_id=app.get("account_id"),
         )
+        if mailer is not None:
+            from app.services.notify import notify_about_app
+
+            await notify_about_app(
+                db,
+                mailer,
+                request.get("by"),
+                app,
+                "version_submit_blocked",
+                f"/apps/{app['_id']}?tab=versions",
+                version=v["version_name"],
+                count=minimum,
+            )
         return False
     author = {"_id": request.get("by"), "name": request.get("by_name"), "role": "developer"}
     review = submission(author, request.get("note") or "", kind="publish", publish_at=request.get("publish_at"))
@@ -245,6 +279,8 @@ class ScanQueue:
                 status = await scan_version(self.db, self.storage, self.settings, version_id)
                 if status == "passed":
                     await auto_submit(self.db, self.mailer, version_id)
+                elif status == "failed":
+                    await notify_scan_failed(self.db, self.mailer, version_id)
             except Exception:
                 log.exception("scan worker error")
             finally:

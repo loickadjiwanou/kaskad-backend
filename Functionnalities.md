@@ -85,6 +85,7 @@ The backend serves two clients: the **client app** (mobile + desktop, public API
 - **Security scan** (background queue, resumed after restart): see section 10.
 - **Edit:** version name, release notes and translations, channel (before going live only); published versions are editable by the platform admin only.
 - **Channels:** production (everyone) and beta (testers only; at least `MIN_BETA_TESTERS` testers, default 3, to submit or publish a beta).
+- **Closed testing (like Google Play):** an app that isn't published yet (draft) is reachable by its testers only — app page (`in_testing: true`), beta downloads, update checks and "my apps" — with its beta versions only; it is never listed in the store (home, search, categories) and has no reviews, reports or public web page until its public launch. Unpublished (archived) apps stay hidden from everyone. The developer is told by email that an approved beta is already installable by the testers.
 - **Scheduled releases:** requested date at submission and/or chosen by the admin; `scheduled` status; a background scheduler publishes due versions every 30 s (atomic claim); cancel schedule; publish now.
 - **Promotion:** a live beta is promoted to production by the platform admin (directly or by approving a promotion request).
 - **Publication effects:** app catalog fields recomputed (available platforms, latest version, last publication — production only); push notification to followers when it's the newest production version of its platform.
@@ -101,7 +102,13 @@ The backend serves two clients: the **client app** (mobile + desktop, public API
 - **Listing drafts:** edits of a live app are stored as a draft (texts, languages, media, categories…), submitted, then published (applied to the live listing) or rejected; the draft can be discarded; media cleanup aware of live + draft.
 - **Promotion requests** for live betas.
 - **Moderation endpoints** (platform admin): review requests (pending / rejected), the security scan queue (including scheduled versions), **app reports** (open / closed) and **reported / hidden user reviews**.
-- **Follow-up emails:** new request → platform admin; approval / rejection / scheduling / publication → author; in each recipient's language.
+- **Follow-up emails** (each recipient's language), worded according to the app's visibility in the store:
+  - new request → platform admin, with a note when the app isn't published yet;
+  - version approved: "available for download in the store" only if the app is published; otherwise "approved but not downloadable yet — next step: request the app's publication" (or "downloadable as soon as the pending publication is approved"); beta → "available to testers only"; promotion → "now in production"; scheduled → date, with a warning if the app isn't published;
+  - app publication approved → "visible in the store" (or "no downloadable version yet"); unpublished / back to draft → explained;
+  - rejections (version, status request, listing) with the reason; security scan failed (with the first error); automatic submission blocked (not enough testers);
+  - decisions made directly by the platform admin (no request) → the person who uploaded the version, or the account owner, with "decision made by the platform admin";
+  - recipient fallback: API key or deactivated member → account owner; the person who performed the action never gets an email about it.
 
 ---
 
@@ -156,7 +163,7 @@ The backend serves two clients: the **client app** (mobile + desktop, public API
 ## 14. Emails (Brevo)
 
 - Transports: Brevo SMTP relay (STARTTLS / TLS) or Brevo HTTP API; without configuration, emails are written to the logs (development).
-- HTML + text emails with the Kaskad layout, in French or English: email confirmation, password reset, team invitation, beta tester invitation, "to review", version published / rejected / scheduled, status request approved / rejected, listing published / rejected, account suspended / reactivated, reply to a user review (to the reviewer), app reported (to the platform admin).
+- HTML + text emails with the Kaskad layout, in French or English: email confirmation, password reset, team invitation, beta tester invitation, "to review", version available / available to testers / promoted / approved but app not published / scheduled / rejected, security scan failed, automatic submission blocked, app published / unpublished / back to draft, status request rejected, listing published / rejected, account suspended / reactivated, reply to a user review (to the reviewer), app reported (to the platform admin).
 - Sent in the background; failures are logged without breaking the request.
 
 ---

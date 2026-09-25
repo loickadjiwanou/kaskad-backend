@@ -162,7 +162,7 @@ TESTER = {
     "fr": {
         "subject": "Vous êtes invité à tester {app}",
         "title": "Testez {app} en avant-première",
-        "body": "{account} vous a ajouté comme testeur de {app} sur Kaskad. Vous pourrez voir et télécharger ses versions bêta avant leur publication pour tous.",
+        "body": "{account} vous a ajouté comme testeur de {app} sur Kaskad. Vous pourrez voir et télécharger ses versions bêta avant leur publication pour tous, même avant le lancement public de l'application.",
         "how": "Connectez-vous à l'app Kaskad (mobile ou ordinateur) avec l'adresse {email}. Pas encore de compte ? Créez-le dans l'app avec cette adresse.",
         "button": "Ouvrir {app} dans Kaskad",
         "ignore": "Si vous ne souhaitez pas tester cette application, ignorez cet e-mail.",
@@ -170,7 +170,7 @@ TESTER = {
     "en": {
         "subject": "You're invited to test {app}",
         "title": "Try {app} before everyone else",
-        "body": "{account} added you as a tester of {app} on Kaskad. You'll be able to see and download its beta versions before they are released to everyone.",
+        "body": "{account} added you as a tester of {app} on Kaskad. You'll be able to see and download its beta versions before they are released to everyone, even before the app's public launch.",
         "how": "Sign in to the Kaskad app (mobile or desktop) with {email}. No account yet? Create one in the app with this address.",
         "button": "Open {app} in Kaskad",
         "ignore": "If you don't want to test this app, just ignore this email.",
@@ -269,21 +269,73 @@ SUBJECT_LABELS = {
 
 NOTIFICATIONS = {
     "fr": {
+        # Versions : le texte dépend de la visibilité de l'app dans le store (publiée ou non)
         "version_published": (
-            "Version publiée : {app} {version}",
-            "La version {version} de {app} a été validée et publiée. Elle est maintenant disponible au téléchargement.",
+            "Version disponible : {app} {version}",
+            "La version {version} de {app} a été validée et publiée : elle est maintenant disponible au téléchargement dans le store Kaskad.",
+        ),
+        "version_published_beta": (
+            "Version bêta disponible : {app} {version}",
+            "La version bêta {version} de {app} a été validée et publiée : elle est disponible dans Kaskad pour les testeurs de l'application uniquement.",
+        ),
+        "version_published_beta_testing": (
+            "Version bêta disponible : {app} {version}",
+            "La version bêta {version} de {app} a été validée : vos testeurs peuvent déjà l'installer depuis Kaskad (lien reçu dans leur invitation), même si l'application n'est pas encore publiée. Elle reste invisible pour les autres utilisateurs du store.",
+        ),
+        "version_promoted": (
+            "Version en production : {app} {version}",
+            "La version {version} de {app} est passée du canal bêta à la production : elle est maintenant disponible pour tous les utilisateurs du store Kaskad.",
+        ),
+        "version_approved_hidden": (
+            "Version validée : {app} {version}",
+            "La version {version} de {app} a été validée, mais elle n'est pas encore téléchargeable : l'application n'est pas publiée dans le store Kaskad. Prochaine étape : demandez la publication de l'application depuis sa fiche dans la console (« Demander la publication »).",
+        ),
+        "version_approved_hidden_pending": (
+            "Version validée : {app} {version}",
+            "La version {version} de {app} a été validée. Elle sera téléchargeable dans le store Kaskad dès que la publication de l'application, en cours de validation, sera approuvée.",
         ),
         "version_scheduled": (
             "Version programmée : {app} {version}",
-            "La version {version} de {app} a été validée. Elle sera publiée automatiquement le {date}.",
+            "La version {version} de {app} a été validée. Elle sera mise en ligne automatiquement le {date}.",
+        ),
+        "version_scheduled_hidden": (
+            "Version programmée : {app} {version}",
+            "La version {version} de {app} a été validée et sera mise en ligne le {date}. Attention : l'application n'est pas encore publiée dans le store ; la version ne sera téléchargeable qu'une fois l'application publiée.",
         ),
         "version_rejected": (
             "Version refusée : {app} {version}",
             "La version {version} de {app} a été refusée par l'administrateur de la plateforme.",
         ),
-        "status_approved": ("Demande approuvée : {app}", "Votre demande de {status} de {app} a été approuvée."),
+        "version_scan_rejected": (
+            "Analyse de sécurité échouée : {app} {version}",
+            "La version {version} de {app} n'a pas passé l'analyse de sécurité : elle ne peut être ni soumise ni publiée.",
+        ),
+        "version_submit_blocked": (
+            "Soumission bloquée : {app} {version}",
+            "La version bêta {version} de {app} a passé l'analyse de sécurité mais n'a pas été soumise : l'application doit avoir au moins {count} testeurs. Ajoutez-les, puis soumettez la version depuis la console.",
+        ),
+        # Statut de l'app (demande approuvée ou décision directe de l'administrateur)
+        "app_published": (
+            "Application publiée : {app}",
+            "{app} est maintenant publiée : elle est visible dans le store Kaskad et ses versions validées sont téléchargeables.",
+        ),
+        "app_published_empty": (
+            "Application publiée : {app}",
+            "{app} est maintenant publiée dans le store Kaskad, mais elle n'a encore aucune version téléchargeable : les utilisateurs voient sa fiche sans pouvoir la télécharger. Soumettez une version depuis l'onglet Versions.",
+        ),
+        "app_archived": (
+            "Application dépubliée : {app}",
+            "{app} n'est plus visible dans le store Kaskad. Les utilisateurs qui l'ont déjà installée la conservent, mais ne voient plus ses mises à jour.",
+        ),
+        "app_draft": (
+            "Application repassée en brouillon : {app}",
+            "{app} est repassée en brouillon : elle n'est plus visible dans le store Kaskad.",
+        ),
         "status_rejected": ("Demande refusée : {app}", "Votre demande de {status} de {app} a été refusée."),
-        "listing_published": ("Fiche mise à jour : {app}", "Les modifications de la fiche de {app} ont été validées et sont en ligne."),
+        "listing_published": (
+            "Fiche mise à jour : {app}",
+            "Les modifications de la fiche de {app} ont été validées : elles sont visibles dans le store Kaskad.",
+        ),
         "listing_rejected": ("Modifications refusées : {app}", "Les modifications de la fiche de {app} ont été refusées."),
         "review_requested": ("À valider : {app}", "{member} ({account}) a soumis {subject} de {app} pour validation."),
         "app_reported": (
@@ -317,17 +369,64 @@ NOTIFICATIONS = {
     },
     "en": {
         "version_published": (
-            "Version published: {app} {version}",
-            "Version {version} of {app} was approved and published. It is now available for download.",
+            "Version available: {app} {version}",
+            "Version {version} of {app} was approved and published: it is now available for download in the Kaskad store.",
+        ),
+        "version_published_beta": (
+            "Beta version available: {app} {version}",
+            "Beta version {version} of {app} was approved and published: it is available in Kaskad to the app's testers only.",
+        ),
+        "version_published_beta_testing": (
+            "Beta version available: {app} {version}",
+            "Beta version {version} of {app} was approved: your testers can already install it from Kaskad (link in their invitation), even though the app isn't published yet. It stays invisible to other store users.",
+        ),
+        "version_promoted": (
+            "Version in production: {app} {version}",
+            "Version {version} of {app} moved from the beta channel to production: it is now available to every Kaskad store user.",
+        ),
+        "version_approved_hidden": (
+            "Version approved: {app} {version}",
+            "Version {version} of {app} was approved, but it can't be downloaded yet: the app isn't published in the Kaskad store. Next step: request the app's publication from its page in the console (“Request publishing”).",
+        ),
+        "version_approved_hidden_pending": (
+            "Version approved: {app} {version}",
+            "Version {version} of {app} was approved. It will be downloadable in the Kaskad store as soon as the app's publication, currently under review, is approved.",
         ),
         "version_scheduled": (
             "Version scheduled: {app} {version}",
-            "Version {version} of {app} was approved. It will be published automatically on {date}.",
+            "Version {version} of {app} was approved. It will go live automatically on {date}.",
+        ),
+        "version_scheduled_hidden": (
+            "Version scheduled: {app} {version}",
+            "Version {version} of {app} was approved and will go live on {date}. Note: the app isn't published in the store yet; the version will only be downloadable once the app is published.",
         ),
         "version_rejected": ("Version rejected: {app} {version}", "Version {version} of {app} was rejected by the platform admin."),
-        "status_approved": ("Request approved: {app}", "Your {status} request for {app} was approved."),
+        "version_scan_rejected": (
+            "Security scan failed: {app} {version}",
+            "Version {version} of {app} didn't pass the security scan: it can't be submitted or published.",
+        ),
+        "version_submit_blocked": (
+            "Submission blocked: {app} {version}",
+            "Beta version {version} of {app} passed the security scan but wasn't submitted: the app needs at least {count} testers. Add them, then submit the version from the console.",
+        ),
+        "app_published": (
+            "App published: {app}",
+            "{app} is now published: it is visible in the Kaskad store and its approved versions can be downloaded.",
+        ),
+        "app_published_empty": (
+            "App published: {app}",
+            "{app} is now published in the Kaskad store, but it has no downloadable version yet: users see its page but can't download it. Submit a version from the Versions tab.",
+        ),
+        "app_archived": (
+            "App unpublished: {app}",
+            "{app} is no longer visible in the Kaskad store. Users who already installed it keep it but no longer see its updates.",
+        ),
+        "app_draft": ("App moved back to draft: {app}", "{app} was moved back to draft: it is no longer visible in the Kaskad store."),
         "status_rejected": ("Request rejected: {app}", "Your {status} request for {app} was rejected."),
-        "listing_published": ("Listing updated: {app}", "The listing changes of {app} were approved and are live."),
+        "listing_published": (
+            "Listing updated: {app}",
+            "The listing changes of {app} were approved: they are visible in the Kaskad store.",
+        ),
         "listing_rejected": ("Changes rejected: {app}", "The listing changes of {app} were rejected."),
         "review_requested": ("To review: {app}", "{member} ({account}) submitted {subject} of {app} for review."),
         "app_reported": ("Report: {app}", "A user reported {app} (reason: {reason}). The report is waiting for you in Moderation."),
@@ -364,6 +463,11 @@ NOTIFICATION_TEXT = {
         "note": "Note : {note}",
         "button": "Ouvrir dans la console",
         "fix": "Corrigez ce qui est indiqué puis soumettez à nouveau depuis la console.",
+        "fix_scan": "Corrigez le problème puis envoyez une nouvelle version depuis la console (ou relancez l'analyse).",
+        "lead_approved": "Votre demande a été approuvée par l'administrateur de la plateforme.",
+        "lead_direct": "Cette décision a été prise par l'administrateur de la plateforme.",
+        "app_hidden": "À noter : l'application n'est pas encore publiée dans le store.",
+        "error": "Détail : {error}",
     },
     "en": {
         "greeting": "Hi {name},",
@@ -371,6 +475,11 @@ NOTIFICATION_TEXT = {
         "note": "Note: {note}",
         "button": "Open in the console",
         "fix": "Fix what is described, then submit again from the console.",
+        "fix_scan": "Fix the issue, then upload a new version from the console (or scan it again).",
+        "lead_approved": "Your request was approved by the platform admin.",
+        "lead_direct": "This decision was made by the platform admin.",
+        "app_hidden": "Note: the app isn't published in the store yet.",
+        "error": "Details: {error}",
     },
 }
 
@@ -391,12 +500,20 @@ def notification_email(lang: str, kind: str, to_email: str, name: str, url: str,
     t = NOTIFICATION_TEXT[lang]
     fmt = {"app": "", "version": "", "account": "", "member": "", "status": "", "subject": "", "date": "", "count": "", **ctx}
     title = subject.format(**fmt)
-    paragraphs = [t["greeting"].format(name=name or ""), body.format(**fmt)]
+    paragraphs = [t["greeting"].format(name=name or "")]
+    # Qui a décidé : demande approuvée, ou décision directe de l'administrateur
+    if ctx.get("lead") in ("approved", "direct"):
+        paragraphs.append(t[f"lead_{ctx['lead']}"])
+    paragraphs.append(body.format(**fmt))
     if ctx.get("reason") and kind != "app_reported":
         paragraphs.append(t["reason"].format(reason=ctx["reason"]))
+    if ctx.get("error"):
+        paragraphs.append(t["error"].format(error=ctx["error"]))
     if ctx.get("note"):
         paragraphs.append(t["note"].format(note=ctx["note"]))
-    small = [t["fix"]] if kind.endswith("_rejected") else []
+    if ctx.get("app_hidden"):
+        paragraphs.append(t["app_hidden"])
+    small = [t["fix_scan"]] if kind == "version_scan_rejected" else [t["fix"]] if kind.endswith("_rejected") else []
     return Email(
         to_email=to_email,
         to_name=name,

@@ -9,7 +9,7 @@ from app.deps import CurrentUser, Db, LoginLimiter, OptionalUser
 from app.models.common import maybe_oid, now, sid
 from app.models.schemas import AnonymousLogin, EmailPassword, LibraryIn, PushTokenIn, RefreshIn, RegisterIn, UserSession, UserUpdate
 from app.services.auth import issue_tokens, revoke_all, revoke_refresh_token, rotate_refresh_token
-from app.services.catalog import PUBLIC_APP_FILTER, PUBLIC_VERSION_FILTER, app_summary, version_public
+from app.services.catalog import PUBLIC_VERSION_FILTER, REACHABLE_APP_FILTER, app_summary, can_see_app, in_testing, version_public
 from app.services.ratings import refresh_rating
 
 router = APIRouter(tags=["users"])
@@ -129,14 +129,15 @@ async def _my_apps(db, user: dict, lang: str | None = None) -> list[dict]:
     followed = {f["app_id"]: f.get("notify", True) for f in user.get("followed_apps", [])}
     installed = {i["app_id"]: i.get("version_id") for i in user.get("installed_apps", [])}
     app_ids = list(dict.fromkeys([*installed, *followed]))
-    apps = {a["_id"]: a for a in await db.apps.find({"_id": {"$in": app_ids}, **PUBLIC_APP_FILTER}).to_list(None)}
+    # Apps publiées, et apps en test fermé dont l'utilisateur est testeur
+    apps = {
+        a["_id"]: a for a in await db.apps.find({"_id": {"$in": app_ids}, **REACHABLE_APP_FILTER}).to_list(None) if can_see_app(a, user)
+    }
     installed_versions = {v["_id"]: v for v in await db.versions.find({"_id": {"$in": [v for v in installed.values() if v]}}).to_list(None)}
-    # Dernière version de production (les versions bêta ne déclenchent pas d'alerte de mise à jour)
-    public = (
-        await db.versions.find({"app_id": {"$in": list(apps)}, **PUBLIC_VERSION_FILTER, "channel": {"$ne": "beta"}})
-        .sort("version_code", -1)
-        .to_list(None)
-    )
+    # Dernière version de production (les versions bêta ne déclenchent pas d'alerte de mise à jour),
+    # sauf pour une app en test fermé : sa dernière version bêta
+    candidates = await db.versions.find({"app_id": {"$in": list(apps)}, **PUBLIC_VERSION_FILTER}).sort("version_code", -1).to_list(None)
+    public = [v for v in candidates if (v.get("channel") == "beta") == in_testing(apps[v["app_id"]])]
 
     items = []
     for app_id in app_ids:
